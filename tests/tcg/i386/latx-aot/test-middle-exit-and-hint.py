@@ -84,6 +84,8 @@ c_prog = r"""
 #define CF_NO_ACTIVE (1U << 19)
 #define CF_SINGLE_STEP (1U << 20)
 #define CF_USE_ICOUNT (1U << 21)
+#define CF_NO_GOTO_TB (1U << 23)
+#define CF_NO_GOTO_PTR (1U << 24)
 #define HF_CS64_MASK (1U << 15)
 #define HF_CPL_MASK 3U
 #define IRQ_CHECK_ASYNC_NOTIFY 3
@@ -227,10 +229,14 @@ struct tb_desc {
 static CPUState dummy_cpu, *current_cpu = &dummy_cpu;
 static tb_page_addr_t stub_phys_pc = 0x2000;
 static int qht_calls = 0, fsht_reinsert_calls = 0;
+static int supervisor_lookup_calls = 0;
+static bool option_pcid_cache = false;
+static bool option_sys_aot = false;
 static TranslationBlock *qht_fallback_tb = NULL;
 static struct { int htable[MTCC_NR]; } tb_ctx;
 static tb_page_addr_t get_page_addr_code(void *env, vaddr pc) { (void)env; (void)pc; return stub_phys_pc; }
 static bool qemu_tcg_mtcc_enabled(void) { return true; }
+static bool jit_tu_enabled(void) { return false; }
 static uint32_t curr_mtcc(void *env) { (void)env; return 0; }
 static bool tb_is_lookup_private(const TranslationBlock *tb) { return (tb->bool_flags & IS_HRAS_CALL) != 0; }
 static bool tb_lookup_cmp(const void *p, const void *d) {
@@ -248,6 +254,10 @@ static void *tb_qht_lookup(void *ht, const void *d, uint32_t h, bool (*cmp)(cons
     (void)ht; (void)h;
     qht_calls++;
     return (qht_fallback_tb && cmp(qht_fallback_tb, d)) ? qht_fallback_tb : NULL;
+}
+static TranslationBlock *supervisor_tb_qht_lookup(const struct tb_desc *desc, uint32_t hash) {
+    supervisor_lookup_calls++;
+    return tb_qht_lookup(&tb_ctx.htable[0], desc, hash, tb_lookup_cmp);
 }
 static void tb_htable_reinsert_fsht(TranslationBlock *tb, vaddr pc, tb_page_addr_t phys_pc, uint32_t flags) {
     (void)tb; (void)pc; (void)phys_pc; (void)flags;
@@ -443,6 +453,15 @@ int main(void)
     stub_phys_pc = -1;
     assert(tb_htable_lookup_with_hint(&dummy_cpu, 0x401000, 0, owner.flags, 0, &owner) == NULL);
     assert(qht_calls == 1 && fsht_reinsert_calls == 2);
+
+    /* PCID supervisor lookup is selected only when its options permit it. */
+    stub_phys_pc = 0x2000;
+    option_pcid_cache = true;
+    assert(tb_htable_lookup_with_hint(&dummy_cpu, 0x401000, 0, owner.flags, 0, &hras_hint) == &owner);
+    assert(supervisor_lookup_calls == 1 && qht_calls == 2 && fsht_reinsert_calls == 3);
+    option_sys_aot = true;
+    assert(tb_htable_lookup_with_hint(&dummy_cpu, 0x401000, 0, owner.flags, 0, &hras_hint) == &owner);
+    assert(supervisor_lookup_calls == 1 && qht_calls == 3 && fsht_reinsert_calls == 4);
 
     free(buf);
     puts("PASS: middle-exit fast/slow equivalence, chunk-hint lookup, and n=1 native jump replay");
