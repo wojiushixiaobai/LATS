@@ -48,7 +48,7 @@ ADDR latxs_tr_cvt_cpu_addr_write(CPUX86State *env,
 ADDR latxs_tr_cvt_cpu_addr_code(CPUX86State *env,
         target_ulong addr, int *error)
 {
-    CPUTLBEntry *tlb = __get_cpu_tlb(env, addr);
+    CPUTLBEntry *tlb = tlb_entry(env, cpu_mmu_index(env, true), addr);
 
     if (!tlb || tlb->addr_code != (addr & TARGET_PAGE_MASK)) {
         *error = 1;

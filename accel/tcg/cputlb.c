@@ -443,8 +443,6 @@ void latx_pcid_cache_reset(CPUState *cpu)
         tlb_flush_one_mmuidx_locked(cpu->env_ptr, i, get_clock_realtime());
     }
     tlb->c.dirty = 0;
-    cpu_fast_itlb_flush(cpu, MMU_KNOSMAP_IDX);
-    cpu_fast_itlb_flush(cpu, MMU_USER_IDX);
     tb_jmp_cache_flush_current(cpu);
     qemu_spin_unlock(&tlb->c.lock);
 }
@@ -455,44 +453,47 @@ bool latx_pcid_cache_select(CPUState *cpu, unsigned slot, bool retain)
     CPUArchState *env = cpu->env_ptr;
     CPUTLB *tlb = env_tlb(env);
     LatxPcidBank *bank;
-    int64_t now = get_clock_realtime();
+    unsigned next = slot + 1;
 
     g_assert(cache && slot < X86_PCID_SLOTS && qemu_cpu_is_self(cpu));
     qemu_spin_lock(&tlb->c.lock);
-    pcid_save_tlb(cpu, &cache->bank[cache->active]);
-    cache->active = slot + 1;
-    bank = &cache->bank[cache->active];
-    if (!bank->initialized) {
-        CPUJumpCache *jc;
-        LatxNJC *njc;
+    bank = &cache->bank[next];
+    if (next != cache->active) {
+        pcid_save_tlb(cpu, &cache->bank[cache->active]);
+        cache->active = next;
+        if (!bank->initialized) {
+            CPUJumpCache *jc;
+            LatxNJC *njc;
+            int64_t now = get_clock_realtime();
 
-        bank->user_itlb = g_malloc0(FAST_ITLB_SIZE);
-        bank->kernel_itlb = g_malloc0(FAST_ITLB_SIZE);
-        tcg_alloc_jump_caches(&jc, &njc);
-        /* Remote TB invalidators discover a bank through this pointer. */
-        bank->njc = njc;
-        qatomic_rcu_set(&bank->jc, jc);
-        pcid_publish_roots(cpu, bank);
-        memset(tlb->d, 0, sizeof(tlb->d));
-        memset(tlb->f, 0, sizeof(tlb->f));
-        tlb->c.dirty = 0;
-        for (unsigned i = 0; i < NB_MMU_MODES; i++) {
-            tlb_mmu_init(env, i, &tlb->d[i], &tlb->f[i], now);
+            bank->user_itlb = g_malloc0(FAST_ITLB_SIZE);
+            bank->kernel_itlb = g_malloc0(FAST_ITLB_SIZE);
+            tcg_alloc_jump_caches(&jc, &njc);
+            /* Remote TB invalidators discover a bank through this pointer. */
+            bank->njc = njc;
+            qatomic_rcu_set(&bank->jc, jc);
+            pcid_publish_roots(cpu, bank);
+            memset(tlb->d, 0, sizeof(tlb->d));
+            memset(tlb->f, 0, sizeof(tlb->f));
+            tlb->c.dirty = 0;
+            for (unsigned i = 0; i < NB_MMU_MODES; i++) {
+                tlb_mmu_init(env, i, &tlb->d[i], &tlb->f[i], now);
+            }
+            bank->initialized = true;
+            retain = false;
+        } else {
+            pcid_publish_roots(cpu, bank);
+            pcid_load_tlb(cpu, bank);
         }
-        bank->initialized = true;
-        retain = false;
-    } else {
-        pcid_publish_roots(cpu, bank);
-        pcid_load_tlb(cpu, bank);
     }
     retain &= bank->epoch == cache->epoch;
     if (!retain) {
+        int64_t now = get_clock_realtime();
+
         for (unsigned i = 0; i < NB_MMU_MODES; i++) {
             tlb_flush_one_mmuidx_locked(env, i, now);
         }
         tlb->c.dirty = 0;
-        cpu_fast_itlb_flush(cpu, MMU_KNOSMAP_IDX);
-        cpu_fast_itlb_flush(cpu, MMU_USER_IDX);
         tb_jmp_cache_flush_current(cpu);
         bank->epoch = cache->epoch;
     }
@@ -505,6 +506,36 @@ bool latx_pcid_cache_select(CPUState *cpu, unsigned slot, bool retain)
     }
     qemu_spin_unlock(&tlb->c.lock);
     return retain;
+}
+
+void latx_pcid_cache_invalidate_slot(CPUState *cpu, unsigned slot)
+{
+    struct LatxPcidCaches *cache = cpu->latx_pcid_caches;
+    CPUArchState *env = cpu->env_ptr;
+    CPUTLB *tlb = env_tlb(env);
+    unsigned bank = slot + 1;
+
+    g_assert(slot < X86_PCID_SLOTS && qemu_cpu_is_self(cpu));
+    qemu_spin_lock(&tlb->c.lock);
+    cache->bank[bank].epoch = 0;
+    if (cache->active == bank) {
+        int64_t now = get_clock_realtime();
+        for (unsigned i = 0; i < NB_MMU_MODES; i++) {
+            tlb_flush_one_mmuidx_locked(env, i, now);
+        }
+        tlb->c.dirty = 0;
+        tb_jmp_cache_flush_current(cpu);
+        /* The active bank can immediately refill under the same CR3. */
+        cache->bank[bank].epoch = cache->epoch;
+    }
+    qemu_spin_unlock(&tlb->c.lock);
+
+    if (option_rastoptp) {
+        latxs_flush_soft_ras(cpu);
+    }
+#ifdef CONFIG_LATX_TU
+    tu_generation_invalidate(cpu);
+#endif
 }
 
 void latx_pcid_jump_invalidate(CPUState *cpu, vaddr pc, TranslationBlock *tb)
@@ -789,7 +820,7 @@ void tlb_flush_by_mmuidx(CPUState *cpu, uint16_t idxmap)
 
 void tlb_flush(CPUState *cpu)
 {
-    if (hamt_enabled() && hamt_is_running()) {
+    if (cpu != current_cpu && hamt_enabled() && hamt_is_running()) {
         hamt_flush_tlb_all();
     }
     tlb_flush_by_mmuidx(cpu, ALL_MMUIDX_BITS);
@@ -1528,7 +1559,9 @@ void tlb_reset_dirty(CPUState *cpu, ram_addr_t start, ram_addr_t length)
     struct LatxPcidCaches *cache = cpu->latx_pcid_caches;
 
     qemu_spin_lock(&tlb->c.lock);
-    for (unsigned i = 0; i < NB_MMU_MODES; i++) {
+    for (unsigned work = tlb->c.dirty; work; work &= work - 1) {
+        unsigned i = ctz32(work);
+
         tlb_reset_dirty_desc_locked(&tlb->d[i], &tlb->f[i], start, length);
     }
     /* Write protection changes write flags, not address-space mappings. */
@@ -2500,8 +2533,29 @@ tb_page_addr_t get_page_addr_code_hostp(CPUArchState *env, vaddr addr,
     CPUTLBEntryFull *full;
     void *p;
 
+    int mmu_idx = cpu_mmu_index(env, true);
+
+#ifdef CONFIG_LATX_HACK_MEM
+    /* Exact tag match excludes invalid, MMIO and slow-access entries.
+     * Use the same page size and RAM window checks as the full probe. */
+    CPUTLBEntry *entry = tlb_entry(env, mmu_idx, addr);
+    if (tlb_read_idx(entry, MMU_INST_FETCH) == (addr & TARGET_PAGE_MASK)) {
+        uintptr_t paddr = (uintptr_t)addr + entry->addend;
+        if ((paddr & HACK_RAMBASE_MASK) == HACK_RAMBASE) {
+            uintptr_t index = tlb_index(env, mmu_idx, addr);
+            CPUTLBEntryFull *entry_full = &env_tlb(env)->d[mmu_idx].fulltlb[index];
+            if (entry_full->lg_page_size >= TARGET_PAGE_BITS) {
+                if (hostp) {
+                    *hostp = (void *)paddr;
+                }
+                return paddr & ~HACK_RAMBASE;
+            }
+        }
+    }
+#endif
+
     (void)probe_access_internal(env, addr, 1, MMU_INST_FETCH,
-                                cpu_mmu_index(env, true), false,
+                                mmu_idx, false,
                                 &p, &full, 0, false);
     if (p == NULL) {
         return -1;

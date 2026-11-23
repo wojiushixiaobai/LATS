@@ -2358,6 +2358,7 @@ static const name_map insn_name_maps[] = {
 	{ X86_INS_UD0, "ud0" },
 	{ X86_INS_ENDBR32, "endbr32" },
 	{ X86_INS_ENDBR64, "endbr64" },
+	{ X86_INS_VBROADCASTI128, "vbroadcasti128" },
 };
 #endif
 

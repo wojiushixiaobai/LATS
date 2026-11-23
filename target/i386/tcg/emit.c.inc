@@ -2378,17 +2378,18 @@ static void gen_VUCOMI(DisasContext *s, CPUX86State *env, X86DecodedInsn *decode
 static void gen_VZEROALL(DisasContext *s, CPUX86State *env, X86DecodedInsn *decode)
 {
     TCGv_ptr ptr = tcg_temp_new_ptr();
+    int nb_regs = CODE64(s) ? 16 : 8;
 
     tcg_gen_addi_ptr(ptr, cpu_env, offsetof(CPUX86State, xmm_regs));
     gen_helper_memset(ptr, ptr, tcg_constant_i32(0),
-                      tcg_constant_ptr(CPU_NB_REGS * sizeof(ZMMReg)));
+                      tcg_constant_ptr(nb_regs * sizeof(ZMMReg)));
 }
 
 static void gen_VZEROUPPER(DisasContext *s, CPUX86State *env, X86DecodedInsn *decode)
 {
-    int i;
+    int nb_regs = CODE64(s) ? 16 : 8;
 
-    for (i = 0; i < CPU_NB_REGS; i++) {
+    for (int i = 0; i < nb_regs; i++) {
         int offset = offsetof(CPUX86State, xmm_regs[i].ZMM_X(1));
         tcg_gen_gvec_dup_imm(MO_64, offset, 16, 16, 0);
     }

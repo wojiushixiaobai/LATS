@@ -64,6 +64,7 @@ static inline void tb_unlock_pages(TranslationBlock *tb) { }
 static inline void tb_unlock_ctx_pages(int reset) { }
 #else
 bool tb_page_locked(tb_page_addr_t paddr);
+bool tb_page_has_code_locked(tb_page_addr_t paddr);
 void tb_lock_page0(tb_page_addr_t);
 bool tb_trylock_page0(tb_page_addr_t);
 void tb_unlock_page0(tb_page_addr_t paddr);

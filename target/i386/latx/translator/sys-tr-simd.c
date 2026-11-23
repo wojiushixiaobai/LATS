@@ -4344,6 +4344,14 @@ bool latxs_translate_pminub(IR1_INST *pir1)
     return true;
 }
 
+void latxs_gen_psadbw(IR2_OPND *dst, IR2_OPND *a, IR2_OPND *b)
+{
+    latxs_append_ir2_opnd3(LISA_VABSD_BU, dst, a, b);
+    latxs_append_ir2_opnd3(LISA_VHADDW_HU_BU, dst, dst, dst);
+    latxs_append_ir2_opnd3(LISA_VHADDW_WU_HU, dst, dst, dst);
+    latxs_append_ir2_opnd3(LISA_VHADDW_DU_WU, dst, dst, dst);
+}
+
 bool latxs_translate_psadbw(IR1_INST *pir1)
 {
     XMM_EXCP(pir1);
@@ -4355,20 +4363,14 @@ bool latxs_translate_psadbw(IR1_INST *pir1)
     if (ir1_opnd_is_xmm(opnd0)) {
         IR2_OPND d = XMM_LOAD128(opnd0);
         IR2_OPND s = XMM_LOAD128(opnd1);
-        latxs_append_ir2_opnd3(LISA_VABSD_BU, &d, &d, &s);
-        latxs_append_ir2_opnd3(LISA_VHADDW_HU_BU, &d, &d, &d);
-        latxs_append_ir2_opnd3(LISA_VHADDW_WU_HU, &d, &d, &d);
-        latxs_append_ir2_opnd3(LISA_VHADDW_DU_WU, &d, &d, &d);
+        latxs_gen_psadbw(&d, &d, &s);
         return true;
     }
 
     IR2_OPND dest = latxs_load_freg_from_ir1_1(opnd0, false);
     IR2_OPND src = latxs_load_freg_from_ir1_1(opnd1, false);
 
-    latxs_append_ir2_opnd3(LISA_VABSD_BU, &dest, &dest, &src);
-    latxs_append_ir2_opnd3(LISA_VHADDW_HU_BU, &dest, &dest, &dest);
-    latxs_append_ir2_opnd3(LISA_VHADDW_WU_HU, &dest, &dest, &dest);
-    latxs_append_ir2_opnd3(LISA_VHADDW_DU_WU, &dest, &dest, &dest);
+    latxs_gen_psadbw(&dest, &dest, &src);
 
     return true;
 }
@@ -6545,50 +6547,69 @@ bool latxs_translate_andn(IR1_INST *pir1)
     return true;
 }
 
-static void cal_pclmulqdq(IR2_OPND d, IR2_OPND v, IR2_OPND s, uint8_t ctrl)
+void latxs_gen_avx_aes(IR1_OPCODE opcode, IR2_OPND dest, IR2_OPND src,
+                       IR2_OPND key, uint8_t imm)
 {
-    IR2_OPND ctrlp = latxs_ra_alloc_itemp();
-    IR2_OPND a = latxs_ra_alloc_itemp();// a = al
+    switch (opcode) {
+    case X86_INS_VAESDEC:
+        cal_aesdec(dest, src, key);
+        break;
+    case X86_INS_VAESDECLAST:
+        cal_aesdeclast(dest, src, key);
+        break;
+    case X86_INS_VAESENC:
+        cal_aesenc(dest, src, key);
+        break;
+    case X86_INS_VAESENCLAST:
+        cal_aesenclast(dest, src, key);
+        break;
+    case X86_INS_VAESIMC:
+        cal_aesimc(dest, src);
+        break;
+    case X86_INS_VAESKEYGENASSIST:
+        cal_aeskeygenassist(dest, src, imm);
+        break;
+    default:
+        g_assert_not_reached();
+    }
+}
+
+void latxs_gen_pclmulqdq(IR2_OPND dest, IR2_OPND left, IR2_OPND right,
+                         uint8_t ctrl)
+{
+    IR2_OPND a = latxs_ra_alloc_itemp();
     IR2_OPND b = latxs_ra_alloc_itemp();
-    IR2_OPND ftemp = latxs_ra_alloc_ftemp();
+    IR2_OPND low = latxs_ra_alloc_itemp();
+    IR2_OPND high = latxs_ra_alloc_itemp();
+    IR2_OPND a_half = la_a2;
+    IR2_OPND shift = la_a0;
+    IR2_OPND part = la_a1;
+    IR2_OPND loop = latxs_ir2_opnd_new_label();
+    IR2_OPND done = latxs_ir2_opnd_new_label();
 
-    /* 选取操作数 */
-    la_imm(&ctrlp, ctrl);
-    latxs_append_ir2_opnd2i(LISA_ANDI, &a, &ctrlp, 1);// ((ctrl & 1) != 0)
-    latxs_append_ir2_opnd3(LISA_VREPLVE_D, &ftemp, &v, &a);
-    latxs_append_ir2_opnd2i(LISA_VPICKVE2GR_D, &a, &ftemp, 0);
-    latxs_append_ir2_opnd2ii(LISA_BSTRPICK_D, &b, &ctrlp, 4, 4);
-    latxs_append_ir2_opnd3(LISA_VREPLVE_D, &ftemp, &s, &b);
-    latxs_append_ir2_opnd2i(LISA_VPICKVE2GR_D, &b, &ftemp, 0);
-    latxs_ra_free_temp(&ctrlp);
+    latxs_append_ir2_opnd2i(LISA_VPICKVE2GR_D, &a, &left, ctrl & 1);
+    latxs_append_ir2_opnd2i(LISA_VPICKVE2GR_D, &b, &right, (ctrl >> 4) & 1);
+    latxs_append_ir2_opnd2i(LISA_SRLI_D, &a_half, &a, 1);
+    latxs_append_ir2_opnd2i(LISA_ORI, &low, &la_zero, 0);
+    latxs_append_ir2_opnd2i(LISA_ORI, &high, &la_zero, 0);
+    latxs_append_ir2_opnd2(LISA_BEQZ, &b, &done);
 
-    IR2_OPND ah = latxs_ra_alloc_itemp();
-    IR2_OPND resl = latxs_ra_alloc_itemp();
-    IR2_OPND resh = latxs_ra_alloc_itemp();
-    IR2_OPND all_label = latxs_ir2_opnd_new_label();
-    IR2_OPND bit_label = latxs_ir2_opnd_new_label();
-    IR2_OPND end_label = latxs_ir2_opnd_new_label();
+    /* Each set bit adds one shifted copy of a over GF(2). */
+    latxs_append_ir2_opnd1(LISA_LABEL, &loop);
+    latxs_append_ir2_opnd2(LISA_CTZ_D, &shift, &b);
+    latxs_append_ir2_opnd3(LISA_SLL_D, &part, &a, &shift);
+    latxs_append_ir2_opnd3(LISA_XOR, &low, &low, &part);
+    /* (a >> 1) >> (63 - shift) is also valid for shift == 0. */
+    latxs_append_ir2_opnd2i(LISA_XORI, &shift, &shift, 63);
+    latxs_append_ir2_opnd3(LISA_SRL_D, &part, &a_half, &shift);
+    latxs_append_ir2_opnd3(LISA_XOR, &high, &high, &part);
+    latxs_append_ir2_opnd2i(LISA_ADDI_D, &part, &b, -1);
+    latxs_append_ir2_opnd3(LISA_AND, &b, &b, &part);
+    latxs_append_ir2_opnd2(LISA_BNEZ, &b, &loop);
 
-    /* 开始运算 */
-    latxs_append_ir2_opnd3(LISA_AND, &resl, &resl, &la_zero);
-    latxs_append_ir2_opnd3(LISA_AND, &resh, &resh, &la_zero);
-    latxs_append_ir2_opnd3(LISA_AND, &ah, &ah, &la_zero);
-    latxs_append_ir2_opnd2(LISA_BEQZ, &b, &end_label);
-    latxs_append_ir2_opnd1(LISA_LABEL, &all_label);
-    latxs_append_ir2_opnd2i(LISA_ANDI, &la_a0, &b, 1);// b & 1
-    latxs_append_ir2_opnd2i(LISA_SLLI_D, &la_a1, &ah, 1);
-    latxs_append_ir2_opnd2i(LISA_SRLI_D, &la_a2, &a, 0x3f);
-    latxs_append_ir2_opnd2i(LISA_SRLI_D, &b, &b, 1);
-    latxs_append_ir2_opnd2(LISA_BEQZ, &la_a0, &bit_label);
-    latxs_append_ir2_opnd3(LISA_XOR, &resl, &resl, &a);
-    latxs_append_ir2_opnd3(LISA_XOR, &resh, &resh, &ah);
-    latxs_append_ir2_opnd1(LISA_LABEL, &bit_label);
-    latxs_append_ir2_opnd3(LISA_OR, &ah, &la_a1, &la_a2);
-    latxs_append_ir2_opnd2i(LISA_SLLI_D, &a, &a, 0x1);
-    latxs_append_ir2_opnd2(LISA_BNEZ, &b, &all_label);
-    latxs_append_ir2_opnd1(LISA_LABEL, &end_label);
-    latxs_append_ir2_opnd2i(LISA_VINSGR2VR_D, &d, &resl, 0);
-    latxs_append_ir2_opnd2i(LISA_VINSGR2VR_D, &d, &resh, 1);
+    latxs_append_ir2_opnd1(LISA_LABEL, &done);
+    latxs_append_ir2_opnd2i(LISA_VINSGR2VR_D, &dest, &low, 0);
+    latxs_append_ir2_opnd2i(LISA_VINSGR2VR_D, &dest, &high, 1);
 }
 
 bool latxs_translate_pclmulqdq(IR1_INST * pir1)
@@ -6606,7 +6627,7 @@ bool latxs_translate_pclmulqdq(IR1_INST * pir1)
         if(option_aes_opt & 0x40) {
             IR2_OPND dest = latxs_ra_alloc_xmm(s0);
             IR2_OPND src = latxs_ra_alloc_xmm(s1);
-            cal_pclmulqdq(dest, dest, src, ctrl);
+            latxs_gen_pclmulqdq(dest, dest, src, ctrl);
         } else {
             latxs_tr_gen_call_to_helper_pclmulqdq((ADDR)helper_pclmulqdq_xmm, s0, s0, s1, ctrl,
                     HELPER_PCLMULQDQ_XMM);
@@ -6616,7 +6637,7 @@ bool latxs_translate_pclmulqdq(IR1_INST * pir1)
             IR2_OPND dest = latxs_ra_alloc_xmm(s0);
             IR2_OPND src = latxs_ra_alloc_ftemp();
             latxs_load_freg128_from_ir1_mem(&src, opnd1);
-            cal_pclmulqdq(dest, dest, src, ctrl);
+            latxs_gen_pclmulqdq(dest, dest, src, ctrl);
         } else {
             int s1 = 0;
             while (s1 < 8) {

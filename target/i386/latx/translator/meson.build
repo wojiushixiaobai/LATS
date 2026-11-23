@@ -34,6 +34,7 @@ i386_ss.add(files(
   'sys-tr-fldst.c',
   'sys-tr-fcmovcc.c',
   'sys-tr-simd.c',
+  'sys-tr-avx.c',
   'sys-tr-simd-cmp.c',
   'sys-tr-ssse3.c',
   'sys-tr-sse41.c',

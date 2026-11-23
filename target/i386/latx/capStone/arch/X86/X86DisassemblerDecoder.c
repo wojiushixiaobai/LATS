@@ -1116,6 +1116,7 @@ static int getIDWithAttrMask(uint16_t *instructionID,
 		uint16_t attrMask)
 {
 	bool hasModRMExtension;
+	uint8_t opcode = insn->opcode;
 
 	InstructionContext instructionClass;
 
@@ -1127,6 +1128,12 @@ static int getIDWithAttrMask(uint16_t *instructionID,
 	}
 #endif
 
+	/* VBROADCASTI128 has the same operands as VBROADCASTF128. */
+	if (opcode == 0x5a && insn->opcodeType == THREEBYTE_38 &&
+			insn->vectorExtensionType == TYPE_VEX_3B &&
+			insn->vectorExtensionPrefix[2] == 0x7d)
+		opcode = 0x1a;
+
 	if (insn->opcodeType == T3DNOW_MAP)
 		instructionClass = IC_OF;
 	else
@@ -1134,7 +1141,7 @@ static int getIDWithAttrMask(uint16_t *instructionID,
 
 	hasModRMExtension = modRMRequired(insn->opcodeType,
 			instructionClass,
-			insn->opcode) != 0;
+			opcode) != 0;
 
 	if (hasModRMExtension) {
 		if (readModRM(insn))
@@ -1142,12 +1149,12 @@ static int getIDWithAttrMask(uint16_t *instructionID,
 
 		*instructionID = decode(insn->opcodeType,
 				instructionClass,
-				insn->opcode,
+				opcode,
 				insn->modRM);
 	} else {
 		*instructionID = decode(insn->opcodeType,
 				instructionClass,
-				insn->opcode,
+				opcode,
 				0);
 	}
 
@@ -1283,8 +1290,9 @@ static int getID(struct InternalInstruction *insn)
 	} else {
 		/* INVPCID uses 66 as an opcode prefix even in a 16-bit code segment. */
 		bool invpcid = insn->opcodeType == THREEBYTE_38 && insn->opcode == 0x82;
+		bool popcnt = insn->opcodeType == TWOBYTE && insn->opcode == 0xb8;
 		if (insn->prefix2 == 0x66 && (insn->mode != MODE_16BIT || invpcid)) {
-			if (insn->isPrefixf3 && insn->opcode == 0xbc) {
+			if (insn->isPrefixf3 && (popcnt || insn->opcode == 0xbc)) {
 				attrMask |= ATTR_XS;
 			} else if (insn->isPrefixf2 && (insn->opcode == 0xf1 || insn->opcode == 0xf0)) {
 				attrMask |= ATTR_XD;

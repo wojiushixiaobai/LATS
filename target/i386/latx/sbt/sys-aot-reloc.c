@@ -346,6 +346,9 @@ uintptr_t relkind_to_fixup_addr[] = {
     [HELPER_AESIMC_XMM] = (uintptr_t)helper_aesimc_xmm,
     [HELPER_AESDECLAST_XMM] = (uintptr_t)helper_aesdeclast_xmm,
     [HELPER_AESKEYGENASSIST_XMM] = (uintptr_t)helper_aeskeygenassist_xmm,
+#ifndef CONFIG_LATX_TCG_MODE
+    [HELPER_AVX_FP] = (uintptr_t)latxs_avx_fp,
+#endif
     [HELPER_PCLMULQDQ_XMM] = (uintptr_t)helper_pclmulqdq_xmm,
     [HELPER_SHA1MSG1] = (uintptr_t)helper_sha1msg1,
     [HELPER_SHA1MSG2] = (uintptr_t)helper_sha1msg2,

@@ -29,6 +29,7 @@
 #include "seg_helper.h"
 #include "../include/latx-options.h"
 #include "../hamt/hamt.h"
+#include "trace.h"
 
 int get_pg_mode(CPUX86State *env)
 {
@@ -70,7 +71,7 @@ int update_hamt_en(CPUX86State *env)
 {
     if (!hamt_enabled())
         return 0;
-    if (get_pg_mode(env) == 0x1000f) {
+    if (x86_hamt_data_mode_supported(get_pg_mode(env))) {
         env->hflags |= HF_HAMT_EN_MASK;
     } else {
         env->hflags &= ~HF_HAMT_EN_MASK;
@@ -1109,6 +1110,10 @@ void do_interrupt_all(X86CPU *cpu, int intno, int is_int,
 {
     CPUX86State *env = &cpu->env;
 
+    if (intno == EXCP06_ILLOP && !is_int && !is_hw) {
+        trace_x86_invalid_opcode(CPU(cpu)->cpu_index, env->hflags & HF_CPL_MASK,
+                                 env->segs[R_CS].base + env->eip, env->cr[3]);
+    }
     if (qemu_loglevel_mask(CPU_LOG_INT)) {
         if ((env->cr[0] & CR0_PE_MASK)) {
             static int count;

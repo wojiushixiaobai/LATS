@@ -156,6 +156,42 @@ sudo rmmod hamt_pm
 也可以通过 `LATS_OPT="select,hamt=0"` 设置。关闭 HAMT 会显著降低地址转换性能，
 应只用于兼容性验证或缺少必要内核支持的环境。
 
+### 使用 OSX-KVM 启动 macOS 恢复环境
+
+以 [OSX-KVM 的启动脚本](https://github.com/kholia/OSX-KVM/blob/master/boot-macOS-headless.sh)
+为基础，沿用它的 OpenCore 镜像、CPU 拓扑和设备配置。使用仓库提供的
+`OVMF_CODE_4M.fd`，并为每台虚拟机复制一份 `OVMF_VARS-1920x1080.fd`。
+
+按 [OpenCore-ISO 的 CPU 和网卡配置](https://github.com/LongQT-sea/OpenCore-ISO/blob/main/README.md#6-cpu)
+为 macOS 10.11–26 选用 `Skylake-Client-v4`。macOS 10.11–10.15 选用
+`vmxnet3`，macOS 11–26 选用 `virtio-net-pci`，macOS 10.4–10.10 选用
+`e1000`。
+
+原生恢复测试使用 `build-release/lats-x86_64`，SFB 的 `Current State`
+为 `0`。使用下列参数替换上游脚本的 KVM 和 CPU 配置。
+
+```text
+-accel tcg,mode=lat
+-latx select,hamt=1,ghbr=1,shbr=1,aotsys=0
+-fw_cfg name=opt/ovmf/X-PciMmio64Mb,string=0
+-cpu Skylake-Client-v4,kvm=on,vendor=GenuineIntel,+invtsc,vmware-cpuid-freq=on,-pcid,-invpcid,-x2apic,-tsc-deadline,-xsavec,-xsaves,-spec-ctrl,-fma,-f16c,x-force-features=on,check
+```
+
+OVMF 参数将 PCI MMIO 限于低地址。这个设置在测试主机上绕过了 HAMT
+初始化遇到的高地址 MMIO 问题。原生 AVX 和 AVX2 仍只实现子集，CPUID
+默认屏蔽这两项。此处的 `x-force-features=on` 用于恢复环境实验。
+
+AVX 或 AVX2 客体使用 `./latxbuild/build.sh -c tcg` 生成的
+`build-tcg/lats-x86_64`，启动参数为 `-accel tcg,mode=tcg` 和
+`-latx select,hamt=0`。此构建可保留上游 Penryn 配置的
+`+avx,+xsave,+xsaveopt`。需要 AVX2 时可再添加 `+avx2`，或者使用
+相应 macOS 版本的上游 CPU 型号。TCG 模式当前无法使用 HAMT。
+
+[OpenCore-ISO 的 Proxmox/QEMU 指南](https://github.com/LongQT-sea/OpenCore-ISO#6-cpu)
+为 macOS 10.11 至 26 推荐 Skylake 型号，内存建议至少 4 GB，并为 macOS 11
+及以后推荐 VirtIO 网卡。该指南的安装介质是 CD/DVD 格式。上面的恢复盘流程
+直接将 Apple 恢复 DMG 转为磁盘镜像，仍按 OSX-KVM 的方式通过 AHCI 挂载。
+
 ## 4. 默认参数与常用参数组合
 
 不传入 `-latx select,...` 时，LATS 使用默认配置：

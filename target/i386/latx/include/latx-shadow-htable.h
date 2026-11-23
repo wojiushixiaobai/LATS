@@ -22,15 +22,15 @@ extern uint64_t fsht_global_base;
 #define FSHT_SIZE   ((1ULL << FSHT_BITS) << 3)
 #define FSHT_MASK   ((1ULL << FSHT_BITS) - 1)
 
-/* The supported flag sets differ in CPL, SS32, TF, CS64 and HAMT.  Keep
+/* The supported flag sets differ in CPL, SS32, TF, CS64, AVX and HAMT.  Keep
  * one compact shared index, rather than a cached pointer in every TB. */
-#define FSHT_FLAG_KEY_SIZE 32
+#define FSHT_FLAG_KEY_SIZE 64
 extern uint8_t fsht_flag_ids[FSHT_FLAG_KEY_SIZE]; /* table id + 1; zero misses */
 
 static inline unsigned fsht_flags_key(uint32_t flags)
 {
     return (flags & 1) | ((flags >> 4) & 2) | ((flags >> 7) & 4) |
-           ((flags >> 12) & 8) | ((flags >> 26) & 16);
+           ((flags >> 12) & 8) | ((flags >> 26) & 16) | ((flags >> 23) & 32);
 }
 
 static inline int fsht_flags_to_id(uint32_t flags)

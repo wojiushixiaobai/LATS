@@ -611,12 +611,24 @@ void hamt_ras_tp_mirror(int cpuid, uint64_t native_tp)
     if (!option_rastoptp) return;
     /* A TLS address cannot be mistaken for top or the sentinel's -1. */
     g_assert(native_tp > LATX_RAS_TP_SIZE && native_tp != UINT64_MAX);
-    uint64_t areas[] = { hamt_data_area[cpuid], hamt_int_data_area[cpuid],
-                         hamt_err_data_area[cpuid], hamt_ipi_data_area[cpuid] };
+    uint64_t *data = (void *)hamt_data_area[cpuid];
+
+    g_assert(data);
+    /*
+     * This vCPU's dispatcher owns the four areas. A fresh mapping has
+     * a zero TLS slot, and we publish the main slot last.
+     */
+    if (data[HD_RAS_NATIVE_TP_INDEX] == native_tp) {
+        return;
+    }
+
+    uint64_t areas[] = { hamt_int_data_area[cpuid], hamt_err_data_area[cpuid],
+                         hamt_ipi_data_area[cpuid] };
     for (unsigned i = 0; i < ARRAY_SIZE(areas); ++i) {
         g_assert(areas[i]);
         ((uint64_t *)areas[i])[HD_RAS_NATIVE_TP_INDEX] = native_tp;
     }
+    qatomic_store_release(&data[HD_RAS_NATIVE_TP_INDEX], native_tp);
 }
 
 static void hamt_prepare_mt(int cpuid)

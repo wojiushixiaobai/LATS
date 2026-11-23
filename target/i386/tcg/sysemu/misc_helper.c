@@ -279,6 +279,11 @@ void helper_invpcid(CPUX86State *env, target_ulong addr, uint32_t reg,
     if (option_pcid_stats) {
         qatomic_inc(&env->pcid_stats.invpcid[type]);
     }
+    /* Type 0 may invalidate additional addresses within the same PCID. */
+    if (type <= 1 && (env->cr[4] & CR4_PCIDE_MASK) &&
+        hamt_invalidate_single_pcid(env, pcid)) {
+        return;
+    }
     /* Over-invalidation is permitted for all four architectural types. */
     tlb_flush(env_cpu(env));
 }

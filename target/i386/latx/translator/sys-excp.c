@@ -630,6 +630,21 @@ void latxs_tr_gen_excp_gp(IR1_INST *ir1, int end)
     latxs_tr_gen_raise_exception(ir1, EXCP0D_GPF, end);
 }
 
+void latxs_tr_gen_excp_simd(IR1_INST *ir1)
+{
+    IR2_OPND cr4 = latxs_ra_alloc_itemp();
+    IR2_OPND xm = latxs_ir2_opnd_new_label();
+
+    latxs_append_ir2_opnd2i(LISA_LDPTR_W, &cr4, &latxs_env_ir2_opnd,
+                            offsetof(CPUX86State, cr[4]) / 4);
+    latxs_append_ir2_opnd2i(LISA_ANDI, &cr4, &cr4, CR4_OSXMMEXCPT_MASK);
+    latxs_append_ir2_opnd2(LISA_BNEZ, &cr4, &xm);
+    latxs_ra_free_temp(&cr4);
+    latxs_tr_gen_excp_illegal_op(ir1, 0);
+    latxs_append_ir2_opnd1(LISA_LABEL, &xm);
+    latxs_tr_gen_raise_exception(ir1, EXCP13_SIMD, 0);
+}
+
 void latxs_tr_gen_excp_prex(IR1_INST *ir1, int end)
 {
     /* #define EXCP07_PREX 7 */

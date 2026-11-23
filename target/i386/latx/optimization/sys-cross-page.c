@@ -42,6 +42,16 @@ static void tr_lookup_code_fast_itlb_ptw(IR2_OPND *pc,
     IR2_OPND do_page2m = la_new_label();
     IR2_OPND all_done  = la_new_label();
 
+    /*
+     * The fast walk does not accumulate the effective U/S bit across all
+     * levels. Let the full x86 walk check supervisor fetches under SMEP.
+     */
+    if (mmu != MMU_USER_IDX) {
+        la_out2i(LISA_LD_WU, tmp1, &la_env, offsetof(CPUX86State, cr[4]));
+        la_out2ii(LISA_BSTRPICK_D, tmp1, tmp1, 20, 20);
+        la_out2(LISA_BNEZ, tmp1, &do_fault);
+    }
+
     la_imm(tmp0, HACK_RAMBASE);
     la_out2i(LISA_LD_D, tmp1, &la_env, offsetof(CPUX86State, cr[3]));
     /* === Page Table Level 4 === */

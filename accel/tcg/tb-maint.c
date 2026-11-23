@@ -31,6 +31,7 @@
 #include "tb-hash.h"
 #include "tb-context.h"
 #include "internal.h"
+#include "latx-intb-sys.h"
 #include "hamt-tlb.h"
 #ifndef CONFIG_USER_ONLY
 #include "hamt.h"
@@ -576,6 +577,19 @@ bool tb_register_native_source_pages(TranslationBlock *owner)
 bool tb_page_locked(tb_page_addr_t paddr)
 {
     return page_locked(page_find_alloc(paddr >> TARGET_PAGE_BITS, false));
+}
+
+bool tb_page_has_code_locked(tb_page_addr_t paddr)
+{
+    PageDesc *page = page_find_alloc(paddr >> TARGET_PAGE_BITS, false);
+
+    assert_page_locked(page);
+    for (unsigned i = 0; i < tb_ctx.n; i++) {
+        if (page->first_tb[i]) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void tb_lock_page0(tb_page_addr_t paddr)
@@ -1141,6 +1155,9 @@ static void do_tb_flush(CPUState *cpu, run_on_cpu_data tb_flush_count)
     flaged_shadow_htable_reset();
     tb_remove_all();
 
+#if defined(CONFIG_SOFTMMU) && defined(CONFIG_LATX_HACK_MEM) && defined(NDEBUG)
+    latx_supervisor_dispatch_flush();
+#endif
     tcg_region_reset_all();
     aot_reloc_reset_on_tb_flush(-1);
 #ifdef CONFIG_LATX_TU
@@ -1197,6 +1214,11 @@ static void do_tb_flush_mtcc(CPUState *cpu, run_on_cpu_data data)
     tb_remove_mtcc(mtcc_id);
 #endif
 
+#if defined(CONFIG_SOFTMMU) && defined(CONFIG_LATX_HACK_MEM) && defined(NDEBUG)
+    if (mtcc_id == 0) {
+        latx_supervisor_dispatch_flush();
+    }
+#endif
     tcg_region_reset_mtcc(mtcc_id);
     aot_reloc_reset_on_tb_flush(mtcc_id);
 #ifdef CONFIG_LATX_TU

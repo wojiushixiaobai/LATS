@@ -73,6 +73,94 @@ int __intb_link_enable(void)
  *    3.5 (PB) insert private buffer
  *    3.6 jump to next TB
  */
+#if defined(CONFIG_SOFTMMU) && defined(CONFIG_LATX_HACK_MEM) && defined(NDEBUG)
+extern bool one_insn_per_tb;
+
+static void gen_latxs_supervisor_dispatch(IR2_OPND *tb, IR2_OPND *tmp0,
+                                         IR2_OPND *tmp1, IR2_OPND *ret)
+{
+    IR2_OPND *pc = &latxs_arg1_ir2_opnd;
+    IR2_OPND miss = la_new_label();
+    const int tlb_fast = (int)offsetof(ArchCPU, neg.tlb.f[MMU_KNOSMAP_IDX]) -
+                         (int)offsetof(ArchCPU, env);
+    const int cpu_base = -(int)offsetof(ArchCPU, env);
+
+    /* Keep the target PC and guest registers intact on a miss. */
+    la_out2i(LISA_LD_WU, tmp0, &la_env, offsetof(CPUX86State, hflags));
+    la_imm(tmp1, HF_CS64_MASK | HF_CPL_MASK | HF_FORCE_TB_MODE);
+    la_out3(LISA_AND, tmp1, tmp0, tmp1);
+    la_imm(ret, HF_CS64_MASK);
+    la_out3(LISA_BNE, tmp1, ret, &miss);
+
+    la_out2i(LISA_SRLI_D, tmp1, pc, 12);
+    la_out3(LISA_XOR, tmp1, tmp1, pc);
+    la_out2ii(LISA_BSTRPICK_D, tmp1, tmp1,
+              LATX_SUPERVISOR_DISPATCH_BITS - 1, 0);
+    la_imm(tb, DMW_IN(latx_supervisor_dispatch));
+    la_out3i(LISA_ALSL_D, tb, tmp1, tb, 2);
+    la_out2i(LISA_LD_D, tb, tb, 0);
+    la_out2(LISA_BEQZ, tb, &miss);
+    la_outi(LISA_DBAR, 0x14); /* Acquire the published TB. */
+    latxs_tr_dmw_in_fix_mem(tb);
+
+    la_out2i(LISA_LD_D, tmp1, tb, offsetof(TranslationBlock, pc));
+    la_out3(LISA_BNE, tmp1, pc, &miss);
+    la_out2i(LISA_LD_WU, tmp1, &la_env, offsetof(CPUX86State, eflags));
+    la_imm(ret, IOPL_MASK | TF_MASK | RF_MASK | VM_MASK | AC_MASK);
+    la_out3(LISA_AND, tmp1, tmp1, ret);
+    la_out3(LISA_OR, tmp0, tmp0, tmp1);
+    la_out2i(LISA_LD_WU, tmp1, tb, offsetof(TranslationBlock, flags));
+    la_out3(LISA_BNE, tmp1, tmp0, &miss);
+
+    /* Resolve the current execute tag before reusing the translated code. */
+    la_imm(tmp0, tlb_fast);
+    la_out3(LISA_ADD_D, tmp0, &la_env, tmp0);
+    la_out2i(LISA_LD_D, tmp1, tmp0, offsetof(CPUTLBDescFast, mask));
+    la_out2i(LISA_LD_D, tmp0, tmp0, offsetof(CPUTLBDescFast, table));
+    latxs_tr_dmw_in_fix_mem(tmp0);
+    la_out2i(LISA_SRLI_D, ret, pc, TARGET_PAGE_BITS - CPU_TLB_ENTRY_BITS);
+    la_out3(LISA_AND, tmp1, tmp1, ret);
+    la_out3(LISA_ADD_D, tmp0, tmp0, tmp1);
+    la_out2i(LISA_LD_D, tmp1, tmp0, offsetof(CPUTLBEntry, addr_code));
+    la_out2i(LISA_SRLI_D, ret, pc, TARGET_PAGE_BITS);
+    la_out2i(LISA_SLLI_D, ret, ret, TARGET_PAGE_BITS);
+    la_out3(LISA_BNE, tmp1, ret, &miss);
+
+    la_out2i(LISA_LD_D, tmp1, tmp0, offsetof(CPUTLBEntry, addend));
+    la_out3(LISA_ADD_D, tmp1, tmp1, pc);
+    la_imm(tmp0, DMW_IN(&latx_hack_rambase));
+    la_out2i(LISA_LD_D, tmp0, tmp0, 0);
+    la_out3(LISA_XOR, tmp1, tmp1, tmp0);
+    la_out2i(LISA_LD_D, tmp0, tb, offsetof(TranslationBlock, page_addr[0]));
+    la_out3(LISA_BNE, tmp0, tmp1, &miss);
+
+    la_imm(tmp0, cpu_base);
+    la_out3(LISA_ADD_D, tmp0, &la_env, tmp0);
+    la_out2i(LISA_LD_WU, tmp1, tmp0, offsetof(CPUState, singlestep_enabled));
+    la_out2(LISA_BNEZ, tmp1, &miss);
+    la_out2i(LISA_LD_D, tmp1, tmp0, offsetof(CPUState, breakpoints));
+    la_out2(LISA_BNEZ, tmp1, &miss);
+    la_out2i(LISA_LD_WU, tmp1, tmp0, offsetof(CPUState, cflags_next_tb));
+    la_out2i(LISA_ADDI_W, tmp1, tmp1, 1);
+    la_out2(LISA_BNEZ, tmp1, &miss);
+    la_out2i(LISA_LD_WU, tmp1, tmp0, offsetof(CPUState, tcg_cflags));
+    la_out2i(LISA_LD_WU, tmp0, tb, offsetof(TranslationBlock, cflags));
+    la_out3(LISA_BNE, tmp1, tmp0, &miss);
+    la_imm(tmp0, DMW_IN(&one_insn_per_tb));
+    la_out2i(LISA_LD_BU, tmp0, tmp0, 0);
+    la_out2(LISA_BNEZ, tmp0, &miss);
+    if (option_rastoptp) {
+        const int off = offsetof(CPUX86State, ras_tp.reset_pending);
+        la_out2i(LISA_LDPTR_W, tmp0, &la_env, off >> 2);
+        la_out2(LISA_BNEZ, tmp0, &miss);
+    }
+    la_out2i(LISA_LD_D, ret, tb, offsetof(TranslationBlock, tc.ptr));
+    latxs_tr_dmw_in_fix_mem(ret);
+    la_out2i(LISA_JIRL, &la_zero, ret, 0);
+    la_out1(LISA_LABEL, &miss);
+}
+#endif
+
 static int gen_latxs_intb_lookup_impl(void *code_ptr, bool compact, bool resume)
 {
     int code_nr = 0;
@@ -147,7 +235,11 @@ static int gen_latxs_intb_lookup_impl(void *code_ptr, bool compact, bool resume)
 
     latxs_tr_gen_intb_sync_gpc();
 #ifdef CONFIG_SOFTMMU
-    /* ======== 2. fast path htable lookup ======== */
+#if defined(CONFIG_LATX_HACK_MEM) && defined(NDEBUG)
+    if (!resume && mtcc_id == 0 && latx_supervisor_dispatch_enabled()) {
+        gen_latxs_supervisor_dispatch(&tmp, &tmp0, &tmp1, ret0);
+    }
+#endif
 #endif
 
 #if 0

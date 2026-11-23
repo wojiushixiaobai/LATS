@@ -807,7 +807,8 @@ imm_cache_exit_pattern_opt:
         /* 1.4 ea = disp + ea */
         longx offset = ir1_opnd_simm(opnd1) + bias;
         if (int32_in_int12(offset)) {
-            if (option_risk_mem_offset) {
+            /* Narrow addresses must wrap with the displacement applied. */
+            if (option_risk_mem_offset && addr_size == 8) {
                 ea_off = offset;
             } else {
                 latxs_append_ir2_opnd2i(LISA_ADDI_D, &ea,
@@ -889,7 +890,8 @@ imm_cache_exit_pattern_opt:
 
         latxs_append_ir2_opnd3(LISA_ADD_D, &ea, &ea, &seg_base);
         latxs_ra_free_temp(&seg_base);
-        if (addr_size != 8) {
+        /* In 64-bit mode only the offset wraps, before adding FS/GS.base. */
+        if (addr_size != 8 && !td->sys.code64) {
             latxs_append_ir2_opnd2_(lisa_mov32z, &ea, &ea);
         }
     }

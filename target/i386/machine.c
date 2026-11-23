@@ -943,6 +943,40 @@ static const VMStateDescription vmstate_msr_hyperv_reenlightenment = {
     }
 };
 
+#ifdef CONFIG_LATX_TCG_MODE
+static const VMStateDescription vmstate_ymm_reg = {
+    .name = "ymm_reg",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (VMStateField[]) {
+        VMSTATE_UINT64(ZMM_Q(0), ZMMReg),
+        VMSTATE_UINT64(ZMM_Q(1), ZMMReg),
+        VMSTATE_UINT64(ZMM_Q(2), ZMMReg),
+        VMSTATE_UINT64(ZMM_Q(3), ZMMReg),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static bool tcg_ymm_needed(void *opaque)
+{
+    X86CPU *cpu = opaque;
+
+    return cpu->env.features[FEAT_1_ECX] & CPUID_EXT_AVX;
+}
+
+static const VMStateDescription vmstate_tcg_ymm = {
+    .name = "cpu/tcg-ymm",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = tcg_ymm_needed,
+    .fields = (VMStateField[]) {
+        VMSTATE_STRUCT_SUB_ARRAY(env.xmm_regs, X86CPU, 0, CPU_NB_REGS, 0,
+                                 vmstate_ymm_reg, ZMMReg),
+        VMSTATE_END_OF_LIST()
+    }
+};
+#endif
+
 static bool avx512_needed(void *opaque)
 {
     X86CPU *cpu = opaque;
@@ -1750,6 +1784,9 @@ const VMStateDescription vmstate_x86_cpu = {
         &vmstate_msr_hyperv_synic,
         &vmstate_msr_hyperv_stimer,
         &vmstate_msr_hyperv_reenlightenment,
+#ifdef CONFIG_LATX_TCG_MODE
+        &vmstate_tcg_ymm,
+#endif
         &vmstate_avx512,
         &vmstate_xss,
         &vmstate_umwait,

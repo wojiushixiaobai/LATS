@@ -1995,6 +1995,9 @@ fi
 if test "$plugins" = "yes" ; then
     echo "CONFIG_PLUGIN=y" >> $config_host_mak
 fi
+if test "$latx_tcg_mode" = "yes" ; then
+    echo "CONFIG_LATX_TCG_MODE=y" >> $config_host_mak
+fi
 
 tcg_tests_targets=
 for target in $target_list; do

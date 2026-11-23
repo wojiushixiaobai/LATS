@@ -14,6 +14,8 @@
 #include "sys-excp.h"
 #include "latx-sys-tr-mmio.h"
 #include "latx-ghbr.h"
+#include "latx-sys-inst-ptn.h"
+#include "tb-ir1.h"
 
 void latxs_sys_mov_register_ir1(void)
 {
@@ -521,6 +523,31 @@ static bool __latxs_translate_cmovcc(IR1_INST *pir1)
 
     int dest_gpr = ir1_opnd_base_reg_num(opnd0);
     IR2_OPND dest = latxs_ra_alloc_gpr(dest_gpr);
+
+    TRANSLATION_DATA *td = lsenv->tr_data;
+    if (td->sys.code64 && !td->is_tu_mode && td->curr_ir1_nr > 0 &&
+        ir1_opnd_size(opnd0) == 32 && ir1_opnd_is_gpr(opnd1) &&
+        (ir1_opcode(pir1) == X86_INS_CMOVE ||
+         ir1_opcode(pir1) == X86_INS_CMOVNE)) {
+        IR1_INST *previous = ir1_inst_in_list(td->ir1_inst_array,
+                                             td->curr_ir1_nr - 1);
+        if (ir1_opcode(previous) == X86_INS_MOVZX &&
+            previous->instptn.opc == INSTPTN_OPC_NONE &&
+            ir1_opnd_is_same_reg(ir1_get_opnd(previous, 0), opnd0) &&
+            ir1_opnd_is_8l(ir1_get_opnd(previous, 1)) &&
+            !latxs_ghbr_can_elide_write(previous, dest_gpr)) {
+            /*
+             * MOVZX has already cleared the high bits on the false path.
+             * CMOV's register source cannot fault when the move is skipped.
+             */
+            IR2_OPND skip = latxs_ir2_opnd_new_label();
+
+            latxs_append_ir2_opnd2(LISA_BEQZ, &cond, &skip);
+            latxs_store_ir2_to_ir1_gpr(&src, opnd0);
+            latxs_append_ir2_opnd1(LISA_LABEL, &skip);
+            return true;
+        }
+    }
 
     IR2_OPND cond1 = latxs_ra_alloc_itemp();
     IR2_OPND cond2 = latxs_ra_alloc_itemp();

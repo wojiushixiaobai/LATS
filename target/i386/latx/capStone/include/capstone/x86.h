@@ -1894,6 +1894,7 @@ typedef enum x86_insn {
 	X86_INS_UD0,
 	X86_INS_ENDBR32,
 	X86_INS_ENDBR64,
+	X86_INS_VBROADCASTI128,
 
 	X86_INS_ENDING, // mark the end of the list of insn
 } x86_insn;

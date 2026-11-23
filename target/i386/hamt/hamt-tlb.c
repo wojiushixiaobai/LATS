@@ -121,9 +121,49 @@ static inline uint32_t guest_asid(void)
     return option_pcid_asid ? env->hamt_guest_asid : 0xf;
 }
 
+static unsigned hamt_pcid_slot(uint64_t pcid)
+{
+    /* The two KPTI roots can differ only in bit 11 of their PCID. */
+    return (pcid ^ (pcid >> 4) ^ ((pcid >> 8) & 7) ^
+            ((pcid >> 11) << 3)) & (X86_PCID_SLOTS - 1);
+}
+
+bool hamt_invalidate_single_pcid(CPUX86State *env, unsigned pcid)
+{
+    CPUState *cpu = env_cpu(env);
+    unsigned slot = hamt_pcid_slot(pcid);
+    unsigned active = env->hamt_guest_asid - X86_HAMT_ASID_BASE;
+
+    if (!option_pcid_asid || !cpu->latx_pcid_caches || !hamt_is_running() ||
+        active >= X86_PCID_SLOTS || env->cr[3] != env->pcid_context[active]) {
+        /* A fallback CR3 update may leave the old bank selected. */
+        return false;
+    }
+
+    /* The stored full PCID prevents an eviction when only the slot matches. */
+    if ((env->pcid_context[slot] & 0xfff) == pcid) {
+        uint64_t asid = X86_HAMT_ASID_BASE + slot;
+        unsigned bit = 1U << slot;
+
+        if (active == slot || (env->pcid_valid & bit)) {
+            __asm__ __volatile__("invtlb 0x4, %0, $zero" :: "r"(asid)
+                                 : "memory");
+        }
+        if (active == slot) {
+            /* Future refills still belong to the same bound context. */
+            env->pcid_valid |= bit;
+        } else {
+            env->pcid_valid &= ~bit;
+        }
+        latx_pcid_cache_invalidate_slot(cpu, slot);
+        latx_mem_clear_hpet_vpages();
+    }
+    return true;
+}
+
 bool hamt_switch_pcid(CPUX86State *env, uint64_t cr3, bool noflush)
 {
-    unsigned slot = cr3 & (X86_PCID_SLOTS - 1);
+    unsigned slot = hamt_pcid_slot(cr3 & 0xfff);
     unsigned asid = X86_HAMT_ASID_BASE + slot;
     unsigned bits = extract32(read_csr_asid(), 16, 8);
 
