@@ -2144,6 +2144,40 @@ target_ulong helper_crc32(uint32_t crc1, target_ulong msg, uint32_t len)
 static void clmulq(uint64_t *dest_l, uint64_t *dest_h,
                           uint64_t a, uint64_t b)
 {
+#ifdef __SIZEOF_INT128__
+    const uint64_t lane = 0x1111111111111111ULL;
+    uint64_t left[4], right[4];
+    __uint128_t result = 0;
+
+    /*
+     * Each integer product groups polynomial coefficients into nibbles.
+     * Exclude a's low nibble so each coefficient has at most 15 terms
+     * and cannot carry into the next coefficient.
+     */
+    for (unsigned i = 0; i < 4; i++) {
+        uint64_t mask = lane << i;
+        left[i] = a & (mask & ~0xfULL);
+        right[i] = b & mask;
+    }
+
+    for (unsigned i = 0; i < 4; i++) {
+        uint64_t mask = lane << i;
+        __uint128_t coeff = (__uint128_t)left[0] * right[i] ^
+                            (__uint128_t)left[1] * right[(i - 1) & 3] ^
+                            (__uint128_t)left[2] * right[(i - 2) & 3] ^
+                            (__uint128_t)left[3] * right[(i - 3) & 3];
+        result ^= coeff & (((__uint128_t)mask << 64) | mask);
+    }
+
+    /* Add the four terms from a's low nibble over GF(2). */
+    for (unsigned i = 0; i < 4; i++) {
+        __uint128_t mask = -(__uint128_t)((a >> i) & 1);
+        result ^= ((__uint128_t)b << i) & mask;
+    }
+
+    *dest_l = result;
+    *dest_h = result >> 64;
+#else
     uint64_t al, ah, resh, resl;
 
     ah = 0;
@@ -2162,6 +2196,7 @@ static void clmulq(uint64_t *dest_l, uint64_t *dest_h,
 
     *dest_l = resl;
     *dest_h = resh;
+#endif
 }
 #endif
 
