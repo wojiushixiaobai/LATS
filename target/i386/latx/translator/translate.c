@@ -11,6 +11,7 @@
 #include "latx-config.h"
 #include "latx-options.h"
 #include "qemu/error-report.h"
+#include "qemu/log.h"
 #include "latx-ras.h"
 #include "sys-aot.h"
 #include "fpu/softfloat.h"
@@ -24,6 +25,7 @@
 #include "latx-sys-tr-sse42.h"
 #include "latx-sys-tr-ssse3.h"
 #include "tcg/tcg-internal.h"
+#include "trace.h"
 
 bool ir1_need_calculate_cf(IR1_INST *ir1)
 {
@@ -688,6 +690,7 @@ static bool (*translate_functions[])(IR1_INST *) = {
     /*DEF_TR_FUNC(INSERTQ, insertq),*/
     /*DEF_TR_FUNC(INVEPT, invept),*/
     DEF_TR_FUNC(RDRAND, rdrand),
+    DEF_TR_FUNC(RDSEED, rdrand),
 
     DEF_TR_FUNC(CLFLUSH, clflush),
 
@@ -844,12 +847,23 @@ bool ir1_translate(IR1_INST *ir1)
         }
     } else {
         if (translate_functions[tr_func_idx] == NULL || !latxs_is_ir1_ok(ir1)) {
+            if (latxs_translate_avx(ir1)) {
+                return true;
+            }
 #ifdef CONFIG_LATX_PRINT
             fprintf(stderr, "%s %s %d error : this ins %d not implemented\n",
                     __FILE__, __func__, __LINE__, tr_func_idx);
             ir1_opcode_dump(ir1);
 #endif
 #ifdef CONFIG_SOFTMMU
+            if (trace_event_get_state_backends(TRACE_LATX_UNSUPPORTED)) {
+                uint64_t bytes;
+                uint64_t pc = ir1_addr(ir1) + lsenv->tr_data->sys.cs_base;
+
+                memcpy(&bytes, ir1->info->bytes, sizeof(bytes));
+                trace_latx_unsupported(pc, ir1_opcode(ir1),
+                                       latxs_ir1_inst_size(ir1), bytes);
+            }
             latxs_tr_gen_excp_illegal_op_addr(ir1_addr(ir1) - lsenv->tr_data->sys.cs_base, 1);
             translation_success = true;
 #else

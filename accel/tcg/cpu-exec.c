@@ -50,6 +50,8 @@
 #include "qemu/cacheflush.h"
 #include "qemu/memalign.h"
 #include "hamt-dmw.h"
+#include "latx-intb-sys.h"
+#include "latx-hack.h"
 
 #include "latx/include/latx-ras.h"
 #include "latx/include/latx-misc.h"
@@ -341,6 +343,51 @@ static inline void tb_htable_reinsert_fsht(TranslationBlock *tb, vaddr pc,
 #endif
 }
 
+#if defined(CONFIG_SOFTMMU)
+#define PHYSICAL_TB_CACHE_SIZE 4096
+
+/* This is a host-thread cache of QHT results, not a guest address
+ * translation cache. The caller still resolves and checks the executable
+ * mapping before using it, including after a guest context switch. */
+static __thread struct {
+    unsigned full_epoch;
+    unsigned supervisor_epoch;
+    TranslationBlock *entry[PHYSICAL_TB_CACHE_SIZE];
+} physical_tb_cache;
+
+static TranslationBlock *supervisor_tb_qht_lookup(const struct tb_desc *desc,
+                                                   uint32_t hash)
+{
+    unsigned full = qatomic_read(&tb_ctx.tb_flush_count);
+    unsigned supervisor = qatomic_read(&tb_ctx.tb_flush_count_mtcc[0]);
+    if (unlikely(full != physical_tb_cache.full_epoch ||
+                 supervisor != physical_tb_cache.supervisor_epoch)) {
+        memset(physical_tb_cache.entry, 0, sizeof(physical_tb_cache.entry));
+        physical_tb_cache.full_epoch = full;
+        physical_tb_cache.supervisor_epoch = supervisor;
+    }
+
+    TranslationBlock **slot = &physical_tb_cache.entry[
+        hash & (PHYSICAL_TB_CACHE_SIZE - 1)];
+    TranslationBlock *tb = *slot;
+    /* Whole-cache recycling runs at a vCPU safe point. Individual
+     * invalidations leave the TB allocated and change cflags. */
+    if (tb && !(tb_cflags(tb) & CF_INVALID) &&
+        tb->pc == desc->pc && tb_page_addr0(tb) == desc->page_addr0 &&
+        tb->flags == desc->flags && tb_cflags(tb) == desc->cflags &&
+        tb->cs_base == desc->cs_base) {
+        return tb;
+    }
+
+    tb = tb_qht_lookup(&tb_ctx.htable[0], desc, hash, tb_lookup_cmp);
+    if (tb && tb_page_addr1(tb) == (tb_page_addr_t)-1 &&
+        !(tb->bool_flags & (IS_AOT_TB | IS_TU_TB))) {
+        *slot = tb;
+    }
+    return tb;
+}
+#endif
+
 static TranslationBlock *tb_htable_lookup_with_hint(CPUState *cpu, vaddr pc,
                                           uint64_t cs_base, uint32_t flags,
                                           uint32_t cflags,
@@ -376,7 +423,17 @@ static TranslationBlock *tb_htable_lookup_with_hint(CPUState *cpu, vaddr pc,
         } else {
             h = tb_hash_func(phys_pc, (cflags & CF_PCREL ? 0 : pc),
                              flags, cs_base, cflags);
-            tb = tb_qht_lookup(&tb_ctx.htable[id], &desc, h, tb_lookup_cmp);
+#ifdef CONFIG_SOFTMMU
+            if (id == 0 && option_pcid_cache && !option_sys_aot &&
+                !jit_tu_enabled() &&
+                !(cflags & (CF_PCREL | CF_SINGLE_STEP | CF_USE_ICOUNT |
+                            CF_NO_GOTO_TB | CF_NO_GOTO_PTR))) {
+                tb = supervisor_tb_qht_lookup(&desc, h);
+            } else
+#endif
+            {
+                tb = tb_qht_lookup(&tb_ctx.htable[id], &desc, h, tb_lookup_cmp);
+            }
             assert(tb == NULL || get_mask_from_miscflags(tb,
                         MF_MTCC_ID_MASK, MF_MTCC_ID_SHIFT) == id);
         }
@@ -853,6 +910,42 @@ static bool latx_aot_native_jump_target(const TranslationBlock *tb)
 }
 #endif
 
+#if defined(CONFIG_SOFTMMU) && defined(CONFIG_LATX_HACK_MEM) && defined(NDEBUG)
+TranslationBlock *latx_supervisor_dispatch[1 << LATX_SUPERVISOR_DISPATCH_BITS];
+
+bool latx_supervisor_dispatch_enabled(void)
+{
+    return qemu_tcg_mtcc_enabled() && hamt_enabled() && hamt_mode_dmw() &&
+           option_pcid_cache && !option_page_pcrel &&
+           !option_sys_aot && !jit_tu_enabled();
+}
+
+void latx_supervisor_dispatch_flush(void)
+{
+    /* Called at the same vCPU safe point as translation cache recycling. */
+    memset(latx_supervisor_dispatch, 0, sizeof(latx_supervisor_dispatch));
+}
+
+static void latx_supervisor_dispatch_insert(TranslationBlock *tb, vaddr pc,
+                                            uint32_t flags, uint32_t cflags)
+{
+    if ((flags & (HF_CPL_MASK | HF_CS64_MASK | HF_FORCE_TB_MODE)) != HF_CS64_MASK ||
+        (cflags & ~(CF_PARALLEL | CF_CLUSTER_MASK)) ||
+        !latx_supervisor_dispatch_enabled() ||
+        tb_page_addr1(tb) != (tb_page_addr_t)-1 ||
+        (tb->bool_flags & (IS_AOT_TB | IS_TU_TB)) ||
+        (tb_cflags(tb) != cflags) ||
+        (tb_page_addr0(tb) & HACK_RAMBASE_MASK)) {
+        return;
+    }
+    unsigned index = (pc ^ (pc >> 12)) & (ARRAY_SIZE(latx_supervisor_dispatch) - 1);
+
+    if (qatomic_read(&latx_supervisor_dispatch[index]) != tb) {
+        qatomic_store_release(&latx_supervisor_dispatch[index], tb);
+    }
+}
+#endif
+
 static const void *latx_helper_lookup_tb_hashtable_impl(void *_env,
                                                         bool call_target,
                                                         TranslationBlock **resolved)
@@ -985,6 +1078,11 @@ static const void *latx_helper_lookup_tb_hashtable_impl(void *_env,
         if (entry) {
             return entry;
         }
+    }
+#endif
+#if defined(CONFIG_SOFTMMU) && defined(CONFIG_LATX_HACK_MEM) && defined(NDEBUG)
+    if (!call_target && tb) {
+        latx_supervisor_dispatch_insert(tb, pc, flags, cflags);
     }
 #endif
     return tb ? tb->tc.ptr : res;

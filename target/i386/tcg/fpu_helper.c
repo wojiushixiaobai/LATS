@@ -2596,23 +2596,19 @@ static void do_xsave_sse(CPUX86State *env, target_ulong ptr, uintptr_t ra)
     }
 }
 
-//    TODO support avx.
-//    For now, xmm_regs in CPUX86State is limited to 128 bit.
 static void do_xsave_ymmh(CPUX86State *env, target_ulong ptr, uintptr_t ra)
 {
-    fprintf(stderr, "%s:%d lats not support ymm\n", __func__, __LINE__);
-//    int i, nb_xmm_regs;
-//
-//    if (env->hflags & HF_CS64_MASK) {
-//        nb_xmm_regs = 16;
-//    } else {
-//        nb_xmm_regs = 8;
-//    }
-//
-//    for (i = 0; i < nb_xmm_regs; i++, ptr += 16) {
-//        cpu_stq_data_ra(env, ptr, env->xmm_regs[i].ZMM_Q(2), ra);
-//        cpu_stq_data_ra(env, ptr + 8, env->xmm_regs[i].ZMM_Q(3), ra);
-//    }
+    int nb_regs = env->hflags & HF_CS64_MASK ? 16 : 8;
+
+    for (int i = 0; i < nb_regs; i++, ptr += 16) {
+#ifdef CONFIG_LATX_TCG_MODE
+        cpu_stq_data_ra(env, ptr, env->xmm_regs[i].ZMM_Q(2), ra);
+        cpu_stq_data_ra(env, ptr + 8, env->xmm_regs[i].ZMM_Q(3), ra);
+#else
+        cpu_stq_data_ra(env, ptr, env->ymm_high[i].XMM_Q(0), ra);
+        cpu_stq_data_ra(env, ptr + 8, env->ymm_high[i].XMM_Q(1), ra);
+#endif
+    }
 }
 
 static void do_xsave_bndregs(CPUX86State *env, target_ulong ptr, uintptr_t ra)
@@ -2806,42 +2802,33 @@ static void do_clear_sse(CPUX86State *env)
     }
 }
 
-//    TODO support avx.
-//    For now, xmm_regs in CPUX86State is limited to 128 bit.
 static void do_xrstor_ymmh(CPUX86State *env, target_ulong ptr, uintptr_t ra)
 {
-    fprintf(stderr, "%s:%d lats not support ymm\n", __func__, __LINE__);
-//    int i, nb_xmm_regs;
-//
-//    if (env->hflags & HF_CS64_MASK) {
-//        nb_xmm_regs = 16;
-//    } else {
-//        nb_xmm_regs = 8;
-//    }
-//
-//    for (i = 0; i < nb_xmm_regs; i++, ptr += 16) {
-//        env->xmm_regs[i].ZMM_Q(2) = cpu_ldq_data_ra(env, ptr, ra);
-//        env->xmm_regs[i].ZMM_Q(3) = cpu_ldq_data_ra(env, ptr + 8, ra);
-//    }
+    int nb_regs = env->hflags & HF_CS64_MASK ? 16 : 8;
+
+    for (int i = 0; i < nb_regs; i++, ptr += 16) {
+#ifdef CONFIG_LATX_TCG_MODE
+        env->xmm_regs[i].ZMM_Q(2) = cpu_ldq_data_ra(env, ptr, ra);
+        env->xmm_regs[i].ZMM_Q(3) = cpu_ldq_data_ra(env, ptr + 8, ra);
+#else
+        env->ymm_high[i].XMM_Q(0) = cpu_ldq_data_ra(env, ptr, ra);
+        env->ymm_high[i].XMM_Q(1) = cpu_ldq_data_ra(env, ptr + 8, ra);
+#endif
+    }
 }
 
-//    TODO support avx.
-//    For now, xmm_regs in CPUX86State is limited to 128 bit.
 static void do_clear_ymmh(CPUX86State *env)
 {
-    fprintf(stderr, "%s:%d lats not support ymm\n", __func__, __LINE__);
-//    int i, nb_xmm_regs;
-//
-//    if (env->hflags & HF_CS64_MASK) {
-//        nb_xmm_regs = 16;
-//    } else {
-//        nb_xmm_regs = 8;
-//    }
-//
-//    for (i = 0; i < nb_xmm_regs; i++) {
-//        env->xmm_regs[i].ZMM_Q(2) = 0;
-//        env->xmm_regs[i].ZMM_Q(3) = 0;
-//    }
+    int nb_regs = env->hflags & HF_CS64_MASK ? 16 : 8;
+
+#ifdef CONFIG_LATX_TCG_MODE
+    for (int i = 0; i < nb_regs; i++) {
+        env->xmm_regs[i].ZMM_Q(2) = 0;
+        env->xmm_regs[i].ZMM_Q(3) = 0;
+    }
+#else
+    memset(env->ymm_high, 0, nb_regs * sizeof(env->ymm_high[0]));
+#endif
 }
 
 static void do_xrstor_bndregs(CPUX86State *env, target_ulong ptr, uintptr_t ra)
@@ -3083,6 +3070,10 @@ void helper_xsetbv(CPUX86State *env, uint32_t ecx, uint64_t mask)
         goto do_gpf;
     }
 
+    if ((mask & (XSTATE_YMM_MASK | XSTATE_SSE_MASK)) == XSTATE_YMM_MASK) {
+        goto do_gpf;
+    }
+
     /* Disallow enabling only half of MPX.  */
     if ((mask ^ (mask * (XSTATE_BNDCSR_MASK / XSTATE_BNDREGS_MASK)))
         & XSTATE_BNDCSR_MASK) {
@@ -3154,6 +3145,647 @@ void update_mxcsr_from_sse_status(CPUX86State *env)
                    (flags & float_flag_output_denormal ? FPUS_UE | FPUS_PE :
                     0));
 }
+
+#ifndef CONFIG_LATX_TCG_MODE
+/* QEMU's generic SSE conversion helpers; defined by the ops_sse.h includes
+ * at the end of this file.  The native AVX path reuses them so conversion
+ * semantics (indefinite integers, MXCSR flags, rounding) match generic TCG. */
+void helper_cvtsi2ss(CPUX86State *env, ZMMReg *d, uint32_t val);
+void helper_cvtsi2sd(CPUX86State *env, ZMMReg *d, uint32_t val);
+void helper_cvtsq2ss(CPUX86State *env, ZMMReg *d, uint64_t val);
+void helper_cvtsq2sd(CPUX86State *env, ZMMReg *d, uint64_t val);
+void helper_cvtss2sd(CPUX86State *env, ZMMReg *d, ZMMReg *v, ZMMReg *s);
+void helper_cvtsd2ss(CPUX86State *env, ZMMReg *d, ZMMReg *v, ZMMReg *s);
+int32_t helper_cvtss2si(CPUX86State *env, ZMMReg *s);
+int32_t helper_cvtsd2si(CPUX86State *env, ZMMReg *s);
+int64_t helper_cvtss2sq(CPUX86State *env, ZMMReg *s);
+int64_t helper_cvtsd2sq(CPUX86State *env, ZMMReg *s);
+int32_t helper_cvttss2si(CPUX86State *env, ZMMReg *s);
+int32_t helper_cvttsd2si(CPUX86State *env, ZMMReg *s);
+int64_t helper_cvttss2sq(CPUX86State *env, ZMMReg *s);
+int64_t helper_cvttsd2sq(CPUX86State *env, ZMMReg *s);
+void helper_cvtdq2ps_xmm(CPUX86State *env, ZMMReg *d, ZMMReg *s);
+void helper_cvtdq2ps_ymm(CPUX86State *env, ZMMReg *d, ZMMReg *s);
+void helper_cvtdq2pd_xmm(CPUX86State *env, ZMMReg *d, ZMMReg *s);
+void helper_cvtdq2pd_ymm(CPUX86State *env, ZMMReg *d, ZMMReg *s);
+void helper_cvtps2dq_xmm(CPUX86State *env, ZMMReg *d, ZMMReg *s);
+void helper_cvtps2dq_ymm(CPUX86State *env, ZMMReg *d, ZMMReg *s);
+void helper_cvttps2dq_xmm(CPUX86State *env, ZMMReg *d, ZMMReg *s);
+void helper_cvttps2dq_ymm(CPUX86State *env, ZMMReg *d, ZMMReg *s);
+void helper_cvtpd2dq_xmm(CPUX86State *env, ZMMReg *d, ZMMReg *s);
+void helper_cvtpd2dq_ymm(CPUX86State *env, ZMMReg *d, ZMMReg *s);
+void helper_cvttpd2dq_xmm(CPUX86State *env, ZMMReg *d, ZMMReg *s);
+void helper_cvttpd2dq_ymm(CPUX86State *env, ZMMReg *d, ZMMReg *s);
+void helper_cvtps2pd_xmm(CPUX86State *env, ZMMReg *d, ZMMReg *s);
+void helper_cvtps2pd_ymm(CPUX86State *env, ZMMReg *d, ZMMReg *s);
+void helper_cvtpd2ps_xmm(CPUX86State *env, ZMMReg *d, ZMMReg *s);
+void helper_cvtpd2ps_ymm(CPUX86State *env, ZMMReg *d, ZMMReg *s);
+void helper_addss(CPUX86State *env, ZMMReg *d, ZMMReg *v, ZMMReg *s);
+void helper_addsd(CPUX86State *env, ZMMReg *d, ZMMReg *v, ZMMReg *s);
+void helper_subss(CPUX86State *env, ZMMReg *d, ZMMReg *v, ZMMReg *s);
+void helper_subsd(CPUX86State *env, ZMMReg *d, ZMMReg *v, ZMMReg *s);
+void helper_mulss(CPUX86State *env, ZMMReg *d, ZMMReg *v, ZMMReg *s);
+void helper_mulsd(CPUX86State *env, ZMMReg *d, ZMMReg *v, ZMMReg *s);
+void helper_divss(CPUX86State *env, ZMMReg *d, ZMMReg *v, ZMMReg *s);
+void helper_divsd(CPUX86State *env, ZMMReg *d, ZMMReg *v, ZMMReg *s);
+void helper_minss(CPUX86State *env, ZMMReg *d, ZMMReg *v, ZMMReg *s);
+void helper_minsd(CPUX86State *env, ZMMReg *d, ZMMReg *v, ZMMReg *s);
+void helper_maxss(CPUX86State *env, ZMMReg *d, ZMMReg *v, ZMMReg *s);
+void helper_maxsd(CPUX86State *env, ZMMReg *d, ZMMReg *v, ZMMReg *s);
+void helper_pmovdldup_xmm(CPUX86State *env, ZMMReg *d, ZMMReg *s);
+void helper_pmovdldup_ymm(CPUX86State *env, ZMMReg *d, ZMMReg *s);
+void helper_pblendvb_xmm(CPUX86State *env, ZMMReg *d, ZMMReg *v, ZMMReg *s,
+                         ZMMReg *m);
+void helper_pblendvb_ymm(CPUX86State *env, ZMMReg *d, ZMMReg *v, ZMMReg *s,
+                         ZMMReg *m);
+#define LATXS_HADD_PROTO(name)                                              \
+    void helper_##name##_xmm(CPUX86State *env, ZMMReg *d, ZMMReg *v,        \
+                             ZMMReg *s);                                    \
+    void helper_##name##_ymm(CPUX86State *env, ZMMReg *d, ZMMReg *v,        \
+                             ZMMReg *s)
+LATXS_HADD_PROTO(phaddw);
+LATXS_HADD_PROTO(phaddd);
+LATXS_HADD_PROTO(phaddsw);
+LATXS_HADD_PROTO(phsubw);
+LATXS_HADD_PROTO(phsubd);
+LATXS_HADD_PROTO(phsubsw);
+#undef LATXS_HADD_PROTO
+void helper_roundps_xmm(CPUX86State *env, ZMMReg *d, ZMMReg *s, uint32_t mode);
+void helper_roundps_ymm(CPUX86State *env, ZMMReg *d, ZMMReg *s, uint32_t mode);
+void helper_roundpd_xmm(CPUX86State *env, ZMMReg *d, ZMMReg *s, uint32_t mode);
+void helper_roundpd_ymm(CPUX86State *env, ZMMReg *d, ZMMReg *s, uint32_t mode);
+void helper_roundss_xmm(CPUX86State *env, ZMMReg *d, ZMMReg *v,
+                        ZMMReg *s, uint32_t mode);
+void helper_roundsd_xmm(CPUX86State *env, ZMMReg *d, ZMMReg *v,
+                        ZMMReg *s, uint32_t mode);
+void helper_blendvps_xmm(CPUX86State *env, ZMMReg *d, ZMMReg *v, ZMMReg *s,
+                         ZMMReg *m);
+void helper_blendvps_ymm(CPUX86State *env, ZMMReg *d, ZMMReg *v, ZMMReg *s,
+                         ZMMReg *m);
+void helper_blendvpd_xmm(CPUX86State *env, ZMMReg *d, ZMMReg *v, ZMMReg *s,
+                         ZMMReg *m);
+void helper_blendvpd_ymm(CPUX86State *env, ZMMReg *d, ZMMReg *v, ZMMReg *s,
+                         ZMMReg *m);
+void helper_pblendw_xmm(CPUX86State *env, ZMMReg *d, ZMMReg *v, ZMMReg *s,
+                        uint32_t imm);
+void helper_pblendw_ymm(CPUX86State *env, ZMMReg *d, ZMMReg *v, ZMMReg *s,
+                        uint32_t imm);
+void helper_sqrtps_xmm(CPUX86State *env, ZMMReg *d, ZMMReg *s);
+void helper_sqrtps_ymm(CPUX86State *env, ZMMReg *d, ZMMReg *s);
+void helper_sqrtpd_xmm(CPUX86State *env, ZMMReg *d, ZMMReg *s);
+void helper_sqrtpd_ymm(CPUX86State *env, ZMMReg *d, ZMMReg *s);
+void helper_sqrtss(CPUX86State *env, ZMMReg *d, ZMMReg *v, ZMMReg *s);
+void helper_sqrtsd(CPUX86State *env, ZMMReg *d, ZMMReg *v, ZMMReg *s);
+void helper_pmulhrsw_xmm(CPUX86State *env, ZMMReg *d, ZMMReg *v, ZMMReg *s);
+void helper_pmulhrsw_ymm(CPUX86State *env, ZMMReg *d, ZMMReg *v, ZMMReg *s);
+
+typedef void (*LatxsScalarCmpFn)(CPUX86State *, ZMMReg *, ZMMReg *, ZMMReg *);
+#define LATXS_CMP_DECL(name)                                                \
+    void helper_##name##ss(CPUX86State *, ZMMReg *, ZMMReg *, ZMMReg *);    \
+    void helper_##name##sd(CPUX86State *, ZMMReg *, ZMMReg *, ZMMReg *)
+LATXS_CMP_DECL(cmpeq);
+LATXS_CMP_DECL(cmplt);
+LATXS_CMP_DECL(cmple);
+LATXS_CMP_DECL(cmpunord);
+LATXS_CMP_DECL(cmpneq);
+LATXS_CMP_DECL(cmpnlt);
+LATXS_CMP_DECL(cmpnle);
+LATXS_CMP_DECL(cmpord);
+LATXS_CMP_DECL(cmpequ);
+LATXS_CMP_DECL(cmpnge);
+LATXS_CMP_DECL(cmpngt);
+LATXS_CMP_DECL(cmpfalse);
+LATXS_CMP_DECL(cmpnequ);
+LATXS_CMP_DECL(cmpge);
+LATXS_CMP_DECL(cmpgt);
+LATXS_CMP_DECL(cmptrue);
+LATXS_CMP_DECL(cmpeqs);
+LATXS_CMP_DECL(cmpltq);
+LATXS_CMP_DECL(cmpleq);
+LATXS_CMP_DECL(cmpunords);
+LATXS_CMP_DECL(cmpneqq);
+LATXS_CMP_DECL(cmpnltq);
+LATXS_CMP_DECL(cmpnleq);
+LATXS_CMP_DECL(cmpords);
+LATXS_CMP_DECL(cmpequs);
+LATXS_CMP_DECL(cmpngeq);
+LATXS_CMP_DECL(cmpngtq);
+LATXS_CMP_DECL(cmpfalses);
+LATXS_CMP_DECL(cmpnequs);
+LATXS_CMP_DECL(cmpgeq);
+LATXS_CMP_DECL(cmpgtq);
+LATXS_CMP_DECL(cmptrues);
+#undef LATXS_CMP_DECL
+
+#define LATXS_CMP_ENTRY(name) { helper_##name##ss, helper_##name##sd }
+static const LatxsScalarCmpFn latxs_scalar_cmp[32][2] = {
+    LATXS_CMP_ENTRY(cmpeq),     LATXS_CMP_ENTRY(cmplt),
+    LATXS_CMP_ENTRY(cmple),     LATXS_CMP_ENTRY(cmpunord),
+    LATXS_CMP_ENTRY(cmpneq),    LATXS_CMP_ENTRY(cmpnlt),
+    LATXS_CMP_ENTRY(cmpnle),    LATXS_CMP_ENTRY(cmpord),
+    LATXS_CMP_ENTRY(cmpequ),    LATXS_CMP_ENTRY(cmpnge),
+    LATXS_CMP_ENTRY(cmpngt),    LATXS_CMP_ENTRY(cmpfalse),
+    LATXS_CMP_ENTRY(cmpnequ),   LATXS_CMP_ENTRY(cmpge),
+    LATXS_CMP_ENTRY(cmpgt),     LATXS_CMP_ENTRY(cmptrue),
+    LATXS_CMP_ENTRY(cmpeqs),    LATXS_CMP_ENTRY(cmpltq),
+    LATXS_CMP_ENTRY(cmpleq),    LATXS_CMP_ENTRY(cmpunords),
+    LATXS_CMP_ENTRY(cmpneqq),   LATXS_CMP_ENTRY(cmpnltq),
+    LATXS_CMP_ENTRY(cmpnleq),   LATXS_CMP_ENTRY(cmpords),
+    LATXS_CMP_ENTRY(cmpequs),   LATXS_CMP_ENTRY(cmpngeq),
+    LATXS_CMP_ENTRY(cmpngtq),   LATXS_CMP_ENTRY(cmpfalses),
+    LATXS_CMP_ENTRY(cmpnequs),  LATXS_CMP_ENTRY(cmpgeq),
+    LATXS_CMP_ENTRY(cmpgtq),    LATXS_CMP_ENTRY(cmptrues),
+};
+#undef LATXS_CMP_ENTRY
+
+static void latxs_avx_fp_configure(CPUX86State *env, uint32_t mxcsr)
+{
+    float_status *st = &env->sse_status;
+
+    set_x86_rounding_mode((mxcsr & SSE_RC_MASK) >> SSE_RC_SHIFT, st);
+    set_float_exception_flags(0, st);
+    set_flush_inputs_to_zero((mxcsr & SSE_DAZ) != 0, st);
+    set_flush_to_zero((mxcsr & SSE_FZ) != 0, st);
+}
+
+static uint32_t latxs_avx_fp_update(CPUX86State *env, uint32_t mxcsr,
+                                    float_status *st)
+{
+    uint8_t flags = get_float_exception_flags(st);
+    uint32_t raised;
+
+    raised = (flags & float_flag_invalid ? FPUS_IE : 0) |
+             (flags & float_flag_divbyzero ? FPUS_ZE : 0) |
+             (flags & float_flag_overflow ? FPUS_OE : 0) |
+             (flags & float_flag_underflow ? FPUS_UE : 0) |
+             (flags & float_flag_inexact ? FPUS_PE : 0) |
+             (flags & float_flag_output_denormal ? FPUS_UE | FPUS_PE : 0);
+    env->mxcsr |= raised;
+    env->avx_fp_raised = raised & ~(mxcsr >> 7);
+    return raised;
+}
+
+static void latxs_avx_cvt_dispatch(CPUX86State *env, int op, int ymm, int qword)
+{
+    ZMMReg *d = &env->avx_cvt_operands[0];
+    ZMMReg *s = &env->avx_cvt_operands[2];
+    int64_t iresult;
+
+    switch (op) {
+    case LATX_AVX_CVT_SI2SS:
+        if (qword) {
+            helper_cvtsq2ss(env, d, s->ZMM_Q(0));
+        } else {
+            helper_cvtsi2ss(env, d, s->ZMM_L(0));
+        }
+        break;
+    case LATX_AVX_CVT_SI2SD:
+        if (qword) {
+            helper_cvtsq2sd(env, d, s->ZMM_Q(0));
+        } else {
+            helper_cvtsi2sd(env, d, s->ZMM_L(0));
+        }
+        break;
+    case LATX_AVX_CVT_SS2SD:
+        helper_cvtss2sd(env, d, d, s);
+        break;
+    case LATX_AVX_CVT_SD2SS:
+        helper_cvtsd2ss(env, d, d, s);
+        break;
+    case LATX_AVX_CVT_DQ2PS:
+        if (ymm) {
+            helper_cvtdq2ps_ymm(env, d, s);
+        } else {
+            helper_cvtdq2ps_xmm(env, d, s);
+        }
+        break;
+    case LATX_AVX_CVT_DQ2PD:
+        if (ymm) {
+            helper_cvtdq2pd_ymm(env, d, s);
+        } else {
+            helper_cvtdq2pd_xmm(env, d, s);
+        }
+        break;
+    case LATX_AVX_CVT_PS2DQ:
+        if (ymm) {
+            helper_cvtps2dq_ymm(env, d, s);
+        } else {
+            helper_cvtps2dq_xmm(env, d, s);
+        }
+        break;
+    case LATX_AVX_CVT_TPS2DQ:
+        if (ymm) {
+            helper_cvttps2dq_ymm(env, d, s);
+        } else {
+            helper_cvttps2dq_xmm(env, d, s);
+        }
+        break;
+    case LATX_AVX_CVT_PD2DQ:
+        if (ymm) {
+            helper_cvtpd2dq_ymm(env, d, s);
+        } else {
+            helper_cvtpd2dq_xmm(env, d, s);
+        }
+        break;
+    case LATX_AVX_CVT_TPD2DQ:
+        if (ymm) {
+            helper_cvttpd2dq_ymm(env, d, s);
+        } else {
+            helper_cvttpd2dq_xmm(env, d, s);
+        }
+        break;
+    case LATX_AVX_CVT_PS2PD:
+        if (ymm) {
+            helper_cvtps2pd_ymm(env, d, s);
+        } else {
+            helper_cvtps2pd_xmm(env, d, s);
+        }
+        break;
+    case LATX_AVX_CVT_PD2PS:
+        if (ymm) {
+            helper_cvtpd2ps_ymm(env, d, s);
+        } else {
+            helper_cvtpd2ps_xmm(env, d, s);
+        }
+        break;
+    case LATX_AVX_CVT_SS2SI:
+        iresult = qword ? helper_cvtss2sq(env, s) : helper_cvtss2si(env, s);
+        d->ZMM_Q(0) = iresult;
+        break;
+    case LATX_AVX_CVT_SD2SI:
+        iresult = qword ? helper_cvtsd2sq(env, s) : helper_cvtsd2si(env, s);
+        d->ZMM_Q(0) = iresult;
+        break;
+    case LATX_AVX_CVT_TSS2SI:
+        iresult = qword ? helper_cvttss2sq(env, s) : helper_cvttss2si(env, s);
+        d->ZMM_Q(0) = iresult;
+        break;
+    case LATX_AVX_CVT_TSD2SI:
+        iresult = qword ? helper_cvttsd2sq(env, s) : helper_cvttsd2si(env, s);
+        d->ZMM_Q(0) = iresult;
+        break;
+    case LATX_AVX_CVT_ADDSS:
+        helper_addss(env, d, d, s);
+        break;
+    case LATX_AVX_CVT_ADDSD:
+        helper_addsd(env, d, d, s);
+        break;
+    case LATX_AVX_CVT_SUBSS:
+        helper_subss(env, d, d, s);
+        break;
+    case LATX_AVX_CVT_SUBSD:
+        helper_subsd(env, d, d, s);
+        break;
+    case LATX_AVX_CVT_MULSS:
+        helper_mulss(env, d, d, s);
+        break;
+    case LATX_AVX_CVT_MULSD:
+        helper_mulsd(env, d, d, s);
+        break;
+    case LATX_AVX_CVT_DIVSS:
+        helper_divss(env, d, d, s);
+        break;
+    case LATX_AVX_CVT_DIVSD:
+        helper_divsd(env, d, d, s);
+        break;
+    case LATX_AVX_CVT_MINSS:
+        helper_minss(env, d, d, s);
+        break;
+    case LATX_AVX_CVT_MINSD:
+        helper_minsd(env, d, d, s);
+        break;
+    case LATX_AVX_CVT_MAXSS:
+        helper_maxss(env, d, d, s);
+        break;
+    case LATX_AVX_CVT_MAXSD:
+        helper_maxsd(env, d, d, s);
+        break;
+    case LATX_AVX_CVT_DDUP:
+        if (ymm) {
+            helper_pmovdldup_ymm(env, d, s);
+        } else {
+            helper_pmovdldup_xmm(env, d, s);
+        }
+        break;
+    case LATX_AVX_CVT_PBLENDVB: {
+        ZMMReg *s2 = &env->avx_cvt_operands[1];
+        ZMMReg *m = &env->avx_cvt_operands[2];
+
+        if (ymm) {
+            helper_pblendvb_ymm(env, d, d, s2, m);
+        } else {
+            helper_pblendvb_xmm(env, d, d, s2, m);
+        }
+        break;
+    }
+    case LATX_AVX_CVT_PHADDW:
+        if (ymm) {
+            helper_phaddw_ymm(env, d, d, s);
+        } else {
+            helper_phaddw_xmm(env, d, d, s);
+        }
+        break;
+    case LATX_AVX_CVT_PHADDD:
+        if (ymm) {
+            helper_phaddd_ymm(env, d, d, s);
+        } else {
+            helper_phaddd_xmm(env, d, d, s);
+        }
+        break;
+    case LATX_AVX_CVT_PHADDSW:
+        if (ymm) {
+            helper_phaddsw_ymm(env, d, d, s);
+        } else {
+            helper_phaddsw_xmm(env, d, d, s);
+        }
+        break;
+    case LATX_AVX_CVT_PHSUBW:
+        if (ymm) {
+            helper_phsubw_ymm(env, d, d, s);
+        } else {
+            helper_phsubw_xmm(env, d, d, s);
+        }
+        break;
+    case LATX_AVX_CVT_PHSUBD:
+        if (ymm) {
+            helper_phsubd_ymm(env, d, d, s);
+        } else {
+            helper_phsubd_xmm(env, d, d, s);
+        }
+        break;
+    case LATX_AVX_CVT_PHSUBSW:
+        if (ymm) {
+            helper_phsubsw_ymm(env, d, d, s);
+        } else {
+            helper_phsubsw_xmm(env, d, d, s);
+        }
+        break;
+    case LATX_AVX_CVT_ROUNDPS:
+        if (ymm) {
+            helper_roundps_ymm(env, d, s, env->avx_cvt_operands[1].ZMM_L(0));
+        } else {
+            helper_roundps_xmm(env, d, s, env->avx_cvt_operands[1].ZMM_L(0));
+        }
+        break;
+    case LATX_AVX_CVT_ROUNDPD:
+        if (ymm) {
+            helper_roundpd_ymm(env, d, s, env->avx_cvt_operands[1].ZMM_L(0));
+        } else {
+            helper_roundpd_xmm(env, d, s, env->avx_cvt_operands[1].ZMM_L(0));
+        }
+        break;
+    case LATX_AVX_CVT_ROUNDSS:
+        helper_roundss_xmm(env, d, d, s, env->avx_cvt_operands[1].ZMM_L(0));
+        break;
+    case LATX_AVX_CVT_ROUNDSD:
+        helper_roundsd_xmm(env, d, d, s, env->avx_cvt_operands[1].ZMM_L(0));
+        break;
+    case LATX_AVX_CVT_BLENDVPS: {
+        ZMMReg *s2 = &env->avx_cvt_operands[1];
+        ZMMReg *m = &env->avx_cvt_operands[2];
+
+        if (ymm) {
+            helper_blendvps_ymm(env, d, d, s2, m);
+        } else {
+            helper_blendvps_xmm(env, d, d, s2, m);
+        }
+        break;
+    }
+    case LATX_AVX_CVT_PBLENDW: {
+        uint32_t imm = env->avx_cvt_operands[1].ZMM_L(0);
+
+        if (ymm) {
+            helper_pblendw_ymm(env, d, d, s, imm);
+        } else {
+            helper_pblendw_xmm(env, d, d, s, imm);
+        }
+        break;
+    }
+    case LATX_AVX_CVT_BLENDVPD: {
+        ZMMReg *s2 = &env->avx_cvt_operands[1];
+        ZMMReg *m = &env->avx_cvt_operands[2];
+
+        if (ymm) {
+            helper_blendvpd_ymm(env, d, d, s2, m);
+        } else {
+            helper_blendvpd_xmm(env, d, d, s2, m);
+        }
+        break;
+    }
+    case LATX_AVX_CVT_SQRTPS:
+        if (ymm) {
+            helper_sqrtps_ymm(env, d, s);
+        } else {
+            helper_sqrtps_xmm(env, d, s);
+        }
+        break;
+    case LATX_AVX_CVT_SQRTPD:
+        if (ymm) {
+            helper_sqrtpd_ymm(env, d, s);
+        } else {
+            helper_sqrtpd_xmm(env, d, s);
+        }
+        break;
+    case LATX_AVX_CVT_SQRTSS:
+        helper_sqrtss(env, d, d, s);
+        break;
+    case LATX_AVX_CVT_SQRTSD:
+        helper_sqrtsd(env, d, d, s);
+        break;
+    case LATX_AVX_CVT_PMULHRSW:
+        if (ymm) {
+            helper_pmulhrsw_ymm(env, d, d, s);
+        } else {
+            helper_pmulhrsw_xmm(env, d, d, s);
+        }
+        break;
+    case LATX_AVX_CVT_PH2PS:
+        if (ymm) {
+            helper_cvtph2ps_ymm(env, d, s);
+        } else {
+            helper_cvtph2ps_xmm(env, d, s);
+        }
+        break;
+    case LATX_AVX_CVT_PS2PH: {
+        uint32_t imm = env->avx_cvt_operands[1].ZMM_L(0);
+
+        if (ymm) {
+            helper_cvtps2ph_ymm(env, d, s, imm);
+        } else {
+            helper_cvtps2ph_xmm(env, d, s, imm);
+        }
+        break;
+    }
+    case LATX_AVX_CVT_RCPPS:
+        if (ymm) {
+            helper_rcpps_ymm(env, d, s);
+        } else {
+            helper_rcpps_xmm(env, d, s);
+        }
+        break;
+    case LATX_AVX_CVT_RSQRTPS:
+        if (ymm) {
+            helper_rsqrtps_ymm(env, d, s);
+        } else {
+            helper_rsqrtps_xmm(env, d, s);
+        }
+        break;
+    case LATX_AVX_CVT_RCPSS:
+        helper_rcpss(env, d, d, s);
+        break;
+    case LATX_AVX_CVT_RSQRTSS:
+        helper_rsqrtss(env, d, d, s);
+        break;
+    case LATX_AVX_CVT_SLDUP:
+        if (ymm) {
+            helper_pmovsldup_ymm(env, d, s);
+        } else {
+            helper_pmovsldup_xmm(env, d, s);
+        }
+        break;
+    case LATX_AVX_CVT_SHDUP:
+        if (ymm) {
+            helper_pmovshdup_ymm(env, d, s);
+        } else {
+            helper_pmovshdup_xmm(env, d, s);
+        }
+        break;
+    case LATX_AVX_CVT_PSHUFLW: {
+        uint32_t imm = env->avx_cvt_operands[1].ZMM_L(0);
+
+        if (ymm) {
+            helper_pshuflw_ymm(d, s, imm);
+        } else {
+            helper_pshuflw_xmm(d, s, imm);
+        }
+        break;
+    }
+    case LATX_AVX_CVT_PSHUFHW: {
+        uint32_t imm = env->avx_cvt_operands[1].ZMM_L(0);
+
+        if (ymm) {
+            helper_pshufhw_ymm(d, s, imm);
+        } else {
+            helper_pshufhw_xmm(d, s, imm);
+        }
+        break;
+    }
+    default:
+        if (op >= LATX_AVX_CVT_CMPSS_BASE &&
+            op < LATX_AVX_CVT_CMPSS_BASE + 32) {
+            int pred = op - LATX_AVX_CVT_CMPSS_BASE;
+
+            latxs_scalar_cmp[pred][0](env, d, d, s);
+            break;
+        }
+        if (op >= LATX_AVX_CVT_CMPSD_BASE &&
+            op < LATX_AVX_CVT_CMPSD_BASE + 32) {
+            int pred = op - LATX_AVX_CVT_CMPSD_BASE;
+
+            latxs_scalar_cmp[pred][1](env, d, d, s);
+            break;
+        }
+        g_assert_not_reached();
+    }
+}
+
+#define AVX_FP_ELEMENT(F, FIELD)                                             \
+    for (int i = 0; i < count; i++) {                                        \
+        F a = operands[0].FIELD[i];                                          \
+        F b = operands[1].FIELD[i];                                          \
+        F c = fused ? operands[2].FIELD[i] : 0;                              \
+        F result;                                                           \
+                                                                            \
+        if (!(mxcsr & SSE_DAZ) &&                                           \
+            (F ## _is_denormal(a) || F ## _is_denormal(b) ||                   \
+             F ## _is_denormal(c))) {                                         \
+            raised |= FPUS_DE;                                               \
+        }                                                                   \
+        switch (op) {                                                       \
+        case LATX_AVX_FP_ADD:                                                \
+            result = F ## _add(a, b, st);                                    \
+            break;                                                          \
+        case LATX_AVX_FP_SUB:                                                \
+            result = F ## _sub(a, b, st);                                    \
+            break;                                                          \
+        case LATX_AVX_FP_MUL:                                                \
+            result = F ## _mul(a, b, st);                                    \
+            break;                                                          \
+        case LATX_AVX_FP_DIV:                                                \
+            result = F ## _div(a, b, st);                                    \
+            break;                                                          \
+        case LATX_AVX_FP_FMA:                                                \
+            result = F ## _muladd(a, b, c, 0, st);                           \
+            break;                                                          \
+        case LATX_AVX_FP_FMSUB:                                              \
+            result = F ## _muladd(a, b, c, float_muladd_negate_c, st);       \
+            break;                                                          \
+        case LATX_AVX_FP_FNMADD:                                             \
+            result = F ## _muladd(a, b, c,                                   \
+                                  float_muladd_negate_product, st);         \
+            break;                                                          \
+        case LATX_AVX_FP_FNMSUB:                                             \
+            result = F ## _muladd(a, b, c,                                   \
+                                  float_muladd_negate_product |             \
+                                  float_muladd_negate_c, st);               \
+            break;                                                          \
+        default:                                                            \
+            g_assert_not_reached();                                         \
+        }                                                                   \
+        operands[0].FIELD[i] = result;                                      \
+    }
+
+void latxs_avx_fp(CPUX86State *env, int op, int count, int qword)
+{
+    uint32_t mxcsr = env->mxcsr;
+    float_status *st = &env->sse_status;
+
+    latxs_avx_fp_configure(env, mxcsr);
+
+    if (op >= LATX_AVX_FP_SFMA && op <= LATX_AVX_FP_SFNMSUB) {
+        ZMMReg *o = env->avx_cvt_operands;
+        int flags = op == LATX_AVX_FP_SFMSUB ? float_muladd_negate_c :
+                    op == LATX_AVX_FP_SFNMADD ? float_muladd_negate_product :
+                    op == LATX_AVX_FP_SFNMSUB ?
+                        (float_muladd_negate_product | float_muladd_negate_c) :
+                        0;
+
+        if (qword) {
+            o[3].ZMM_D(0) = float64_muladd(o[0].ZMM_D(0), o[1].ZMM_D(0),
+                                           o[2].ZMM_D(0), flags, st);
+        } else {
+            o[3].ZMM_S(0) = float32_muladd(o[0].ZMM_S(0), o[1].ZMM_S(0),
+                                           o[2].ZMM_S(0), flags, st);
+        }
+        latxs_avx_fp_update(env, mxcsr, st);
+        return;
+    }
+
+    if (op >= LATX_AVX_CVT_SI2SS) {
+        latxs_avx_cvt_dispatch(env, op, count, qword);
+        latxs_avx_fp_update(env, mxcsr, st);
+        return;
+    }
+
+    LatxAvxFpVector *operands = env->avx_fp_operands;
+    uint32_t raised = 0;
+    bool fused = op >= LATX_AVX_FP_FMA && op <= LATX_AVX_FP_FNMSUB;
+
+    if (qword) {
+        AVX_FP_ELEMENT(float64, d);
+    } else {
+        AVX_FP_ELEMENT(float32, s);
+    }
+    latxs_avx_fp_update(env, mxcsr, st);
+    /* The denormal flag is computed here instead of by softfloat; its MXCSR
+     * mask bit is DM (bit 8), i.e. bit 1 of the shifted mask image. */
+    if (raised & FPUS_DE) {
+        env->mxcsr |= FPUS_DE;
+        env->avx_fp_raised |= FPUS_DE & ~(mxcsr >> 7);
+    }
+}
+#undef AVX_FP_ELEMENT
+#endif
 
 void helper_update_mxcsr(CPUX86State *env)
 {

@@ -364,6 +364,7 @@ void latxs_tr_gen_excp_illegal_op(IR1_INST *ir1, int end);
 void latxs_tr_gen_excp_gp(IR1_INST *ir1, int end);
 void latxs_tr_gen_excp_prex(IR1_INST *ir1, int end);
 void latxs_tr_gen_excp_divz(IR1_INST *ir1, int end);
+void latxs_tr_gen_excp_simd(IR1_INST *ir1);
 
 void latxs_tr_gen_infinite_loop(void);
 
@@ -481,6 +482,12 @@ bool latxs_translate_rdtsc(IR1_INST *pir1);
 bool latxs_translate_rdtscp(IR1_INST *pir1);
 bool latxs_translate_rdpmc(IR1_INST *pir1);
 bool latxs_translate_rdrand(IR1_INST *pir1);
+bool latxs_translate_avx(IR1_INST *pir1);
+void latxs_gen_pclmulqdq(IR2_OPND dest, IR2_OPND left, IR2_OPND right,
+                         uint8_t ctrl);
+void latxs_gen_psadbw(IR2_OPND *dst, IR2_OPND *a, IR2_OPND *b);
+void latxs_gen_avx_aes(IR1_OPCODE opcode, IR2_OPND dest, IR2_OPND src,
+                       IR2_OPND key, uint8_t imm);
 bool latxs_translate_popcnt(IR1_INST *pir1);
 bool latxs_translate_crc32(IR1_INST *pir1);
 bool latxs_translate_hlt(IR1_INST *pir1);

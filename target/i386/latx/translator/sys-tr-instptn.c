@@ -1030,7 +1030,19 @@ bool translate_test_jcc(IR1_INST *pir1)
     IR2_OPND src0;
     IR2_OPND src1;
     IR2_OPND temp;
-    if (ir1_opnd_is_gpr(opnd0) && (ir1_opnd_size(opnd0) == 64)) {
+    bool byte_immediate = !td->is_tu_mode && ir1_opnd_is_8l(opnd0) &&
+                          ir1_opnd_is_imm(opnd1) &&
+                          (ir1_opcode(nir1) == WRAP(JE) ||
+                           ir1_opcode(nir1) == WRAP(JNE));
+    if (byte_immediate) {
+        IR2_OPND reg = latxs_ra_alloc_gpr(ir1_opnd_base_reg_num(opnd0));
+
+        /* TEST and its branch consume the same masked byte. */
+        src0 = latxs_ra_alloc_itemp();
+        latxs_append_ir2_opnd2i(LISA_ANDI, &src0, &reg,
+                               ir1_opnd_uimm(opnd1) & 0xff);
+        temp = src0;
+    } else if (ir1_opnd_is_gpr(opnd0) && (ir1_opnd_size(opnd0) == 64)) {
         src0 = latxs_ra_alloc_gpr(ir1_opnd_base_reg_num(opnd0));
     } else {
         src0 = latxs_ra_alloc_itemp();
@@ -1038,7 +1050,7 @@ bool translate_test_jcc(IR1_INST *pir1)
     }
     int is_same_reg = ir1_opnd_is_same_reg(opnd0, opnd1);
     int os = ir1_opnd_size(opnd0); /* 8, 16, 32, 64 */
-    if (is_same_reg) {
+    if (is_same_reg || byte_immediate) {
         if (tu_next_eflag_use) {
             if (tu_eflag_opt) {
 #ifdef CONFIG_LATX_TU
@@ -2737,8 +2749,18 @@ bool translate_bt_jcc(IR1_INST *pir1)
     IR2_OPND mem_base;
     int mem_offset;
 
-    /* get bit_base and bit_off */
-    if (ir1_opnd_is_gpr(bt_opnd0)) {
+    bool immediate_register = ir1_opnd_is_gpr(bt_opnd0) &&
+                              ir1_opnd_is_imm(bt_opnd1);
+    IR2_OPND bit_eflags;
+
+    if (immediate_register) {
+        unsigned bit = ir1_opnd_uimm(bt_opnd1) & t_imm;
+        IR2_OPND reg = latxs_ra_alloc_gpr(ir1_opnd_base_reg_num(bt_opnd0));
+
+        /* Register BT takes the index modulo the operand width. */
+        bit_eflags = latxs_ra_alloc_itemp();
+        latxs_append_ir2_opnd2ii(LISA_BSTRPICK_D, &bit_eflags, &reg, bit, bit);
+    } else if (ir1_opnd_is_gpr(bt_opnd0)) {
         latxs_load_ir1_to_ir2(&bit_base, bt_opnd0, EXMode_Z);
         latxs_load_ir1_to_ir2(&bit_off,  bt_opnd1, EXMode_Z);
         latxs_append_ir2_opnd2i(LISA_ANDI, &bit_off, &bit_off, t_imm);
@@ -2792,14 +2814,15 @@ bool translate_bt_jcc(IR1_INST *pir1)
         }
     }
 
-    IR2_OPND bit_eflags = latxs_ra_alloc_itemp();
-    latxs_append_ir2_opnd3(LISA_SRL_D, &bit_eflags, &bit_base, &bit_off);
-
+    if (!immediate_register) {
+        bit_eflags = latxs_ra_alloc_itemp();
+        latxs_append_ir2_opnd3(LISA_SRL_D, &bit_eflags, &bit_base, &bit_off);
+        latxs_append_ir2_opnd2i(LISA_ANDI, &bit_eflags, &bit_eflags, 1);
+    }
     latxs_ra_free_temp(&bit_off);
     latxs_ra_free_temp(&bit_base);
 
-    /* update EFALGS */
-    latxs_append_ir2_opnd2i(LISA_ANDI, &bit_eflags, &bit_eflags, 1);
+    /* Update CF. */
     if (tu_next_eflag_use == 1) {
         if (tu_eflag_opt) {
 #ifdef CONFIG_LATX_TU

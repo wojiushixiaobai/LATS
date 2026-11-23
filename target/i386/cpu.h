@@ -349,6 +349,13 @@ typedef enum X86Seg {
 #define PG_MODE_PKS      (1 << 18)
 #define PG_MODE_SMEP     (1 << 19)
 
+/* HAMT translates data accesses. SMEP affects instruction fetch only. */
+static inline bool x86_hamt_data_mode_supported(int pg_mode)
+{
+    return (pg_mode & ~PG_MODE_SMEP) ==
+           (PG_MODE_LMA | PG_MODE_PAE | PG_MODE_NXE | PG_MODE_PSE | PG_MODE_WP);
+}
+
 #define MCG_CTL_P       (1ULL<<8)   /* MCG_CAP register available */
 #define MCG_SER_P       (1ULL<<24) /* MCA recovery/new status bits */
 #define MCG_LMCE_P      (1ULL<<27) /* Local Machine Check Supported */
@@ -1198,6 +1205,7 @@ uint64_t x86_cpu_get_supported_feature_word(FeatureWord w,
 #define EXCP10_COPR	16
 #define EXCP11_ALGN	17
 #define EXCP12_MCHK	18
+#define EXCP13_SIMD	19
 
 #define EXCP_VMEXIT     0x100 /* only for system emulation */
 #define EXCP_SYSCALL    0x101 /* only for user emulation */
@@ -1315,6 +1323,100 @@ typedef union YMMReg {
     uint64_t _q_YMMReg[256 / 64];
     XMMReg   _x_YMMReg[256 / 128];
 } YMMReg;
+
+typedef enum LatxAvxFpOp {
+    LATX_AVX_FP_ADD,
+    LATX_AVX_FP_SUB,
+    LATX_AVX_FP_MUL,
+    LATX_AVX_FP_DIV,
+    LATX_AVX_FP_FMA,
+    LATX_AVX_FP_FMSUB,
+    LATX_AVX_FP_FNMADD,
+    LATX_AVX_FP_FNMSUB,
+    /* Scalar FMA variants: one element from scratch[0..2] into scratch[3]. */
+    LATX_AVX_FP_SFMA,
+    LATX_AVX_FP_SFMSUB,
+    LATX_AVX_FP_SFNMADD,
+    LATX_AVX_FP_SFNMSUB,
+} LatxAvxFpOp;
+
+/* Conversion ops handled by latxs_avx_fp() through QEMU's SSE helpers. */
+typedef enum LatxAvxCvtOp {
+    LATX_AVX_CVT_SI2SS = 0x10,
+    LATX_AVX_CVT_SI2SD,
+    LATX_AVX_CVT_SS2SD,
+    LATX_AVX_CVT_SD2SS,
+    LATX_AVX_CVT_DQ2PS,
+    LATX_AVX_CVT_DQ2PD,
+    LATX_AVX_CVT_PS2DQ,
+    LATX_AVX_CVT_TPS2DQ,
+    LATX_AVX_CVT_PD2DQ,
+    LATX_AVX_CVT_TPD2DQ,
+    LATX_AVX_CVT_PS2PD,
+    LATX_AVX_CVT_PD2PS,
+    LATX_AVX_CVT_SS2SI,
+    LATX_AVX_CVT_SD2SI,
+    LATX_AVX_CVT_TSS2SI,
+    LATX_AVX_CVT_TSD2SI,
+    /* Scalar arithmetic, duplicate-low and variable blend, staged through
+     * the same scratch buffer and QEMU SSE helpers. */
+    LATX_AVX_CVT_ADDSS = 0x20,
+    LATX_AVX_CVT_ADDSD,
+    LATX_AVX_CVT_SUBSS,
+    LATX_AVX_CVT_SUBSD,
+    LATX_AVX_CVT_MULSS,
+    LATX_AVX_CVT_MULSD,
+    LATX_AVX_CVT_DIVSS,
+    LATX_AVX_CVT_DIVSD,
+    LATX_AVX_CVT_MINSS,
+    LATX_AVX_CVT_MINSD,
+    LATX_AVX_CVT_MAXSS,
+    LATX_AVX_CVT_MAXSD,
+    LATX_AVX_CVT_DDUP,
+    LATX_AVX_CVT_PBLENDVB,
+    /* Horizontal add/sub and rounding, staged through the scratch buffer. */
+    LATX_AVX_CVT_PHADDW = 0x30,
+    LATX_AVX_CVT_PHADDD,
+    LATX_AVX_CVT_PHADDSW,
+    LATX_AVX_CVT_PHSUBW,
+    LATX_AVX_CVT_PHSUBD,
+    LATX_AVX_CVT_PHSUBSW,
+    LATX_AVX_CVT_ROUNDPS,
+    LATX_AVX_CVT_ROUNDPD,
+    LATX_AVX_CVT_ROUNDSS,
+    LATX_AVX_CVT_ROUNDSD,
+    LATX_AVX_CVT_BLENDVPS = 0x40,
+    LATX_AVX_CVT_BLENDVPD,
+    LATX_AVX_CVT_PBLENDW = 0x42,
+    LATX_AVX_CVT_SQRTPS = 0x50,
+    LATX_AVX_CVT_SQRTPD,
+    LATX_AVX_CVT_SQRTSS,
+    LATX_AVX_CVT_SQRTSD,
+    /* 32 compare predicates each; base + predicate index. */
+    LATX_AVX_CVT_CMPSS_BASE = 0x60,
+    LATX_AVX_CVT_CMPSD_BASE = 0x80,
+    /* Packed integer multiply/round/shift. */
+    LATX_AVX_CVT_PMULHRSW = 0xa0,
+    /* F16C half<->single conversions, including the imm8 rounding control. */
+    LATX_AVX_CVT_PH2PS = 0xb0,
+    LATX_AVX_CVT_PS2PH,
+    /* Approximate reciprocal and reciprocal square root, packed and scalar. */
+    LATX_AVX_CVT_RCPPS = 0xc0,
+    LATX_AVX_CVT_RSQRTPS,
+    LATX_AVX_CVT_RCPSS,
+    LATX_AVX_CVT_RSQRTSS,
+    /* Per-128-bit-lane low/high dword duplication (VMOVSLDUP/VMOVSHDUP). */
+    LATX_AVX_CVT_SLDUP = 0xd0,
+    LATX_AVX_CVT_SHDUP,
+    /* Per-128-bit-lane word shuffles (VPSHUFLW/VPSHUFHW). */
+    LATX_AVX_CVT_PSHUFLW = 0xe0,
+    LATX_AVX_CVT_PSHUFHW,
+} LatxAvxCvtOp;
+
+typedef union LatxAvxFpVector {
+    float32 s[8];
+    float64 d[4];
+} LatxAvxFpVector;
 
 typedef union ZMMReg {
     uint8_t  _b_ZMMReg[512 / 8];
@@ -1624,7 +1726,9 @@ typedef struct CPUArchState {
     void *ptw1m;
     uint64_t vram_base;
     uint64_t vram_size;
+#ifndef CONFIG_LATX_TCG_MODE
     ZMMReg_128 xmm_regs[CPU_NB_REGS == 8 ? 8 : 32] QEMU_ALIGNED(16);
+#endif
     uint64_t vregs[5];
     uint64_t save_regs[32];
     uint64_t tmparea[4];
@@ -1757,7 +1861,10 @@ typedef struct CPUArchState {
     uint32_t new_mxcsr;
     uint32_t old_mxcsr;
     uint32_t excp_divz;
-    //ZMMReg xmm_regs[CPU_NB_REGS == 8 ? 8 : 32] QEMU_ALIGNED(16);
+#ifdef CONFIG_LATX_TCG_MODE
+    /* TCG vector operations address the whole register by its offset. */
+    ZMMReg xmm_regs[CPU_NB_REGS == 8 ? 8 : 32] QEMU_ALIGNED(16);
+#endif
     ZMMReg xmm_t0 QEMU_ALIGNED(16);
     MMXReg mmx_t0;
 
@@ -1899,6 +2006,16 @@ typedef struct CPUArchState {
         uint64_t cache_retained, cache_cold;
         uint64_t invpcid[4], seen[64];
     } pcid_stats;
+#endif
+
+#ifndef CONFIG_LATX_TCG_MODE
+    /* The low halves stay in the native XMM register mapping. */
+    XMMReg ymm_high[CPU_NB_REGS] QEMU_ALIGNED(16);
+    /* Operands and result for the native AVX floating-point slow path. */
+    LatxAvxFpVector avx_fp_operands[3] QEMU_ALIGNED(16);
+    /* Full-width scratch for the conversion helpers (d, v, s). */
+    ZMMReg avx_cvt_operands[4] QEMU_ALIGNED(64);
+    uint32_t avx_fp_raised;
 #endif
 
     /* Fields up to this point are cleared by a CPU reset */
@@ -2421,8 +2538,9 @@ uint64_t cpu_get_tsc(CPUX86State *env);
 
 static inline int cpu_mmu_index(CPUX86State *env, bool ifetch)
 {
+    /* SMAP restricts supervisor data accesses, not instruction fetches. */
     return (env->hflags & HF_CPL_MASK) == 3 ? MMU_USER_IDX :
-        (!(env->hflags & HF_SMAP_MASK) || (env->eflags & AC_MASK))
+        (ifetch || !(env->hflags & HF_SMAP_MASK) || (env->eflags & AC_MASK))
         ? MMU_KNOSMAP_IDX : MMU_KSMAP_IDX;
 }
 
@@ -2558,6 +2676,9 @@ int update_hamt_en(CPUX86State *env);
 
 /* fpu_helper.c */
 void update_fp_status(CPUX86State *env);
+#ifndef CONFIG_LATX_TCG_MODE
+void latxs_avx_fp(CPUX86State *env, int op, int count, int qword);
+#endif
 void update_mxcsr_status(CPUX86State *env);
 void update_mxcsr_from_sse_status(CPUX86State *env);
 

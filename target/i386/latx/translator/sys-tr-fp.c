@@ -545,7 +545,7 @@ bool latxs_translate_xsetbv(IR1_INST *pir1)
     latxs_append_ir2_opnd2_(lisa_mov32z, &mask, &edx_opnd);
     latxs_append_ir2_opnd2i(LISA_SLLI_D, &mask, &mask, 32);
     latxs_append_ir2_opnd2_(lisa_mov32z, &eax_opnd32, &eax_opnd);
-    latxs_append_ir2_opnd3(LISA_AND, &mask, &mask, &eax_opnd32);
+    latxs_append_ir2_opnd3(LISA_OR, &mask, &mask, &eax_opnd32);
     /*
      * 2. call helper_xsetbv
      *

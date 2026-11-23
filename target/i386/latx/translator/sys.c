@@ -37,6 +37,21 @@ void latxs_fix_up_ir1(IR1_INST *ir1)
     TRANSLATION_DATA *td = lsenv->tr_data;
     int i = 0;
 
+    /* The XSAVE helpers share the same state representation for REX.W. */
+    switch (ir1_opcode(ir1)) {
+    case X86_INS_XSAVE64:
+        ir1->info->id = X86_INS_XSAVE;
+        break;
+    case X86_INS_XSAVEOPT64:
+        ir1->info->id = X86_INS_XSAVEOPT;
+        break;
+    case X86_INS_XRSTOR64:
+        ir1->info->id = X86_INS_XRSTOR;
+        break;
+    default:
+        break;
+    }
+
     /* 1. A little bug of capstone */
     if (latxs_ir1_addr_size(ir1) == 2) {
         uint8 modrm = ir1->info->detail->x86.modrm;

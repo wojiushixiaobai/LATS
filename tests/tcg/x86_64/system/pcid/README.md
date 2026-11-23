@@ -14,11 +14,14 @@ Omit the additional options and features to return to A. A and B use
 conservative invalidation. C requires pinned HAMT vCPUs in DMW mode and
 hardware ASIDs enabled. It reserves tags 16–31 in each vCPU, retaining a
 translation only on an explicitly no-flush CR3 write that hits the full
-guest CR3 identity. Slot replacement invalidates the hardware tag before
+guest CR3 identity. The slot index mixes all 12 PCID bits so that the
+user and kernel PCIDs of a KPTI pair need not share a slot. Slot
+replacement invalidates the hardware tag before
 publishing the new owner. Tag 0 remains for the translator and 15 for the
 untagged guest. Existing software TLBs, fast instruction caches and jump
-caches are invalidated on address-space switches. INVPCID handles all four
-types conservatively, including global mappings. Hardware cache contents
+caches are invalidated on address-space switches. With hardware and software
+banks enabled, INVPCID types 0 and 1 clear only the specified PCID's bank.
+Other INVPCID paths conservatively flush all contexts. Hardware cache contents
 are transient across reset and VM state load.
 
 `pcidcache=on` additionally retains the software TLB, fast instruction
@@ -93,6 +96,12 @@ tracking path and is outside this test. For the complete bank regression:
 fresh architectural counters and reused software banks. Compare with the
 same executable and ROM without `--cache` for mechanism cost; do not infer
 Windows application speed from the switch loop alone.
+
+Add `-DPCID_KPTI_ALIAS` to use PCIDs 1 and 2049 during the timed switches.
+The ROM changes a mapping in an inactive bank, invalidates it twice, and
+checks both roots after the switch. It then remaps the active bank,
+invalidates the address, reloads the same PCID with no-flush and executes
+from the new mapping.
 
 The full SMC run also ejects AP 1 through the i440fx ACPI CPU hotplug
 interface after recording the counters. It checks that just the BSP remains.

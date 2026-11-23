@@ -113,7 +113,8 @@ void flaged_shadow_htable_init(void)
     if (!option_flaged_sht) return;
 
     if (hamt_enabled())
-        fsht_num = 14;
+        fsht_num = (!option_aot_save && !option_aot_load && !option_sys_aot)
+            ? 15 : 14;
     else
         fsht_num = 7;
     g_assert(fsht_num < 16);
@@ -135,6 +136,8 @@ void flaged_shadow_htable_init(void)
         fsht[11].flags = 0x4040c2b3;
         fsht[12].flags = 0x4040c2b0;
         fsht[13].flags = 0x4040c290;
+        /* CPL3, CS64, HAMT and the full AVX/SMAP restore workload flags. */
+        fsht[14].flags = fsht[11].flags | HF_AVX_EN_MASK | HF_SMAP_MASK;
     }
     void *d = NULL;
 //  fsht[0].base     = 0x9900000000ULL; // = base + (0 << 28)
@@ -977,13 +980,25 @@ relock:
     tcg_ctx->pre_locked_page1 = -1;
     error = 0;
     if (phys_pc != -1) {
-#if defined(CONFIG_SOFTMMU)
-        tlb_protect_code(phys_pc);
-#endif
         if (tb_trylock_page0(phys_pc)) {
             tb_lock_page0(phys_pc);
             lookup_after_lock = lal_level(1);
         }
+#ifdef CONFIG_SOFTMMU
+        /*
+         * A published TB under the page lock means protection already
+         * completed. For a new page, protect outside the page lock.
+         */
+        if (!tb_page_has_code_locked(phys_pc) ||
+            !tlb_code_page_is_protected(phys_pc)) {
+            tb_unlock_page0(phys_pc);
+            tlb_protect_code(phys_pc);
+            if (tb_trylock_page0(phys_pc)) {
+                tb_lock_page0(phys_pc);
+                lookup_after_lock = lal_level(1);
+            }
+        }
+#endif
         tcg_ctx->pre_locked_page0 = phys_pc;
         /* if page is busy, lookup again after get the lock
          * to avoid useless translation */

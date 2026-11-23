@@ -241,14 +241,11 @@ static void tcg_set_mode(Object *obj, const char *value, Error **errp)
 {
     TCGState *s = TCG_STATE(obj);
 
-    if (strcmp(value, "tcg") == 0) {
-        s->tcg_exec_mode = 1;
-    } else if (strcmp(value, "lat") == 0) {
-        s->tcg_exec_mode = 2;
-    } else if (strcmp(value, "mix") == 0) {
-        s->tcg_exec_mode = 3;
-    } else {
-        error_setg(errp, "Invalid 'mode' setting %s", value);
+    const char *available = s->tcg_exec_mode == 1 ? "tcg" : "lat";
+
+    if (strcmp(value, available) != 0) {
+        error_setg(errp, "Translation mode '%s' is unavailable in this build "
+                   "(available mode: '%s')", value, available);
     }
 }
 

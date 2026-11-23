@@ -14,3 +14,8 @@ kvm_sev_attestation_report(const char *mnonce, const char *data) "mnonce %s data
 
 # Privileged PCID transitions (source RIP from the LATX instruction boundary).
 x86_pcid_cr3(int cpu, uint64_t rip, uint64_t old, uint64_t cr3, bool noflush) "cpu=%d rip=0x%"PRIx64" old=0x%"PRIx64" cr3=0x%"PRIx64" noflush=%d"
+
+# Invalid opcode delivery and native decoder diagnostics.
+x86_invalid_opcode(int cpu, unsigned cpl, uint64_t ip, uint64_t cr3) "cpu=%d cpl=%u ip=0x%"PRIx64" cr3=0x%"PRIx64
+latx_undecodable(uint64_t pc, unsigned b0, unsigned b1, unsigned b2, unsigned b3, unsigned b4) "pc=0x%"PRIx64" bytes=%02x %02x %02x %02x %02x"
+latx_unsupported(uint64_t pc, unsigned opcode, unsigned size, uint64_t bytes) "pc=0x%"PRIx64" opcode=%u size=%u bytes_le=0x%"PRIx64

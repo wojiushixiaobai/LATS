@@ -15,7 +15,11 @@
 #define CODE_A 0x109000
 #define CODE_B 0x10a000
 #define CR3_A  (PML4_A + 1)
+#ifdef PCID_KPTI_ALIAS
+#define CR3_B  (PML4_B + 2049)
+#else
 #define CR3_B  (PML4_B + 2)
+#endif
 #define NOFLUSH 0x8000000000000000
     cli
     /* Run the paged part from RAM, like an OS kernel, not the ISA ROM hole. */
@@ -267,6 +271,34 @@
     call *%rsi
     cmpl $0x11,%eax
     jne .Lfail
+#ifdef PCID_KPTI_ALIAS
+    /* Invalidate A while B uses the same low four PCID bits. */
+    movabsq $(NOFLUSH | CR3_B),%rax
+    movq %rax,%cr3
+    cmpb $0x22,64(%rsi)
+    jne .Lfail
+    movq $CODE_B+3,PT_A
+    movq $1,DESC
+    movq $ALIAS,DESC+8
+    movl $1,%eax
+    invpcid DESC,%rax
+    invpcid DESC,%rax
+    cmpb $0x22,64(%rsi)
+    jne .Lfail
+    movabsq $(NOFLUSH | CR3_A),%rax
+    movq %rax,%cr3
+    call *%rsi
+    cmpl $0x22,%eax
+    jne .Lfail
+    movq $CODE_A+3,PT_A
+    xorl %eax,%eax
+    invpcid DESC,%rax
+    movabsq $(NOFLUSH | CR3_A),%rax
+    movq %rax,%cr3
+    call *%rsi
+    cmpl $0x11,%eax
+    jne .Lfail
+#endif
 #ifdef PCID_BENCH
     /* Both address spaces use the same instruction and data virtual address. */
     lfence
@@ -314,8 +346,8 @@
     cmpl $0x11,%eax
     jne .Lfail
 #endif
-    /* PCIDs 1 and 17 compete for the same slot in the HAMT cache. */
-    movabsq $(NOFLUSH | (PML4_B + 17)),%rax
+    /* PCIDs 1 and 0x111 compete for the same slot in the HAMT cache. */
+    movabsq $(NOFLUSH | (PML4_B + 0x111)),%rax
     movq %rax,%cr3
     cmpb $0x22,64(%rsi)
     jne .Lfail

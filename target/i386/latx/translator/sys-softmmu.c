@@ -28,7 +28,7 @@ inline int can_do_hamt(CPUX86State *env)
 
     if (!hamt_do_cpl(env->hflags & 0x3)) do_hamt = 0;
     if (env->hflags & HF_HAMT_EN_MASK) {
-        assert(get_pg_mode(env) == 0x1000f);
+        assert(x86_hamt_data_mode_supported(get_pg_mode(env)));
     } else {
         do_hamt = 0;
     }

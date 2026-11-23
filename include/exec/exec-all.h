@@ -128,6 +128,7 @@ void tlb_flush_page_all_cpus_synced(CPUState *src, vaddr addr);
 void tlb_flush(CPUState *cpu);
 void tlb_flush_after_pcid_switch(CPUState *cpu);
 bool latx_pcid_cache_select(CPUState *cpu, unsigned slot, bool retain);
+void latx_pcid_cache_invalidate_slot(CPUState *cpu, unsigned slot);
 void latx_pcid_cache_init(CPUState *cpu);
 void latx_pcid_cache_destroy(CPUState *cpu);
 void latx_pcid_cache_reset(CPUState *cpu);

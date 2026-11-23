@@ -2735,6 +2735,17 @@ size_t latxs_decode_one(csh decoder, const uint8_t *code, uint64_t address,
                             insn, ir1_num, base);
     ir1_decode_timing_record_capstone(&timing, stats, capstone_start,
                                       option_ir1_cache_enabled);
+    if (count == 1 && (*insn)->detail &&
+        (*insn)->id == X86_INS_VBROADCASTF128) {
+        unsigned modrm = (*insn)->detail->x86.encoding.modrm_offset;
+
+        if (modrm && code[modrm - 1] == 0x5a) {
+            (*insn)->id = X86_INS_VBROADCASTI128;
+#ifdef CONFIG_LATX_DEBUG
+            strcpy((*insn)->mnemonic, "vbroadcasti128");
+#endif
+        }
+    }
     if (count == 1 && *insn && (*insn)->id == X86_INS_LFENCE &&
         ((mode == 64 && ir1_is_incssp_rex_bytes(code)) ||
          ir1_is_incsspd_bytes(code))) {

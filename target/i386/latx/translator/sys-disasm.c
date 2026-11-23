@@ -19,6 +19,7 @@
 #include "sys-aot.h"
 #include "sys-aot-tu-merge.h"
 #include "exec/cputlb.h"
+#include "trace.h"
 
 #ifdef CONFIG_LATX_TU
 #include <latx-tu.h>
@@ -111,6 +112,11 @@ inline ADDRX latxs_ir1_disasm(IR1_INST *ir1,
 		lsassert(ir1->info == NULL);
         ir1->info = pir1_base + (ir1_num * IR1_INST_SIZE);
         return 0;
+    }
+
+    if (trace_event_get_state_backends(TRACE_LATX_UNSUPPORTED)) {
+        memset(info->bytes, 0, sizeof(uint64_t));
+        memcpy(info->bytes, addr, MIN(info->size, sizeof(uint64_t)));
     }
 
     ir1->flags = 0;
@@ -356,6 +362,8 @@ static void __latxs_disasm_do_error_sys(IR1_INST *pir1,
                 is += 1;
             }
             lsassert(is < 14);
+            trace_latx_undecodable(pc, inst_cache[0], inst_cache[1],
+                                   inst_cache[2], inst_cache[3], inst_cache[4]);
             /* next_pc has no meaning if illegal instruction is detected */
             latxs_ir1_make_ins_ILLEGAL(pir1, pc, is + 1, LATXS_IR1_FLAGS_ILLOP);
         }

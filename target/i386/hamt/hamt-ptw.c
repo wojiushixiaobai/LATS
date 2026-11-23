@@ -658,13 +658,14 @@ bool hamt_try_do_ptw(CPUX86State *env,
                      int w,
                      hamt_ptw_error_t *ptwerror)
 {
-    lsassertm(get_pg_mode(env) == 0x1000f,
-            "HAMT page mode not 0x1000f : epc %p\n", epc);
+    bool data_mode = x86_hamt_data_mode_supported(get_pg_mode(env));
+
+    lsassertm(data_mode, "unsupported HAMT data page mode: epc %p\n", epc);
 
     int mmu_index = cpu_mmu_index(env, false);
     if (!hamt_enabled() ||
         !hamt_use_ptw() ||
-        get_pg_mode(env) != 0x1000f ||
+        !data_mode ||
         (mmu_index != MMU_USER_IDX && mmu_index != MMU_KNOSMAP_IDX))
     {
         ptwerror->error = HAMT_PTW_ERROR_DISABLE;

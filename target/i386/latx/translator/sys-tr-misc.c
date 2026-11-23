@@ -85,6 +85,7 @@ void latxs_sys_misc_register_ir1(void)
     latxs_register_ir1(X86_INS_RDTSCP);
     latxs_register_ir1(X86_INS_RDPMC);
     latxs_register_ir1(X86_INS_RDRAND);
+    latxs_register_ir1(X86_INS_RDSEED);
     latxs_register_ir1(X86_INS_POPCNT);
     latxs_register_ir1(X86_INS_HLT);
     latxs_register_ir1(X86_INS_RDMSR);
@@ -3742,7 +3743,15 @@ bool latxs_translate_enter(IR1_INST *pir1)
 
     int imm2 = -(esp_addend + (data_size >> 3) * level);
     if (pushpop) {
-        td->sp_patch += imm2;
+        /*
+         * The push of EBP above is materialized to MEM(SS:RSP) but RSP itself
+         * is only tracked through sp_patch, so the pushed slot must be
+         * accounted here as well.  Without it the next push/pop in the new
+         * frame aliases the saved EBP slot: the callee's first push overwrites
+         * the saved frame pointer and its LEAVE then reloads EBP from it
+         * (ring-3 only, because pushpop is disabled for CPL 0).
+         */
+        td->sp_patch += imm2 - (data_size >> 3);
 #ifdef CONFIG_LATX_PROFILER
         TranslationBlock *tb = lsenv->tr_data->curr_tb;
         per_tb_count((void *)&((tb->profile).pushpop_sub), 2);
@@ -3953,14 +3962,17 @@ bool latxs_translate_rdpmc(IR1_INST *pir1)
 bool latxs_translate_rdrand(IR1_INST *pir1)
 {
     TRANSLATION_DATA *td = lsenv->tr_data;
+    bool seed = ir1_opcode(pir1) == X86_INS_RDSEED;
+    bool supported = seed ?
+        (td->sys.cpuid_7_0_ebx_features & CPUID_7_0_EBX_RDSEED) :
+        (td->sys.cpuid_ext_features & CPUID_EXT_RDRAND);
 
-    if (pir1->info->detail->x86.prefix[0] & (X86_PREFIX_LOCK | X86_PREFIX_REPE | X86_PREFIX_REPNE)
-            || !(td->sys.cpuid_ext_features & CPUID_EXT_RDRAND)){
+    if (pir1->info->detail->x86.prefix[0] || !supported ||
+        !ir1_opnd_is_gpr(ir1_get_opnd(pir1, 0))) {
 #ifdef CONFIG_SOFTMMU
-        lsassertm_illop(ir1_addr(pir1), 0, "illegal rdrand\n");
+        latxs_tr_gen_excp_illegal_op(pir1, 1);
         return true;
 #else
-        lsassertm(0, "illegal rdrand\n");
         return false;
 #endif
     }
@@ -3970,7 +3982,6 @@ bool latxs_translate_rdrand(IR1_INST *pir1)
     }
 
     IR1_OPND *opnd0 = ir1_get_opnd(pir1, 0);
-    /*IR2_OPND dest_opnd = latxs_load_ireg_from_ir1(opnd0, EXMode_N);*/
     /* save context */
     latxs_tr_gen_call_to_helper_prologue_cfg(nofp_helper_cfg);
     /*  arg0: env */
@@ -3984,6 +3995,8 @@ bool latxs_translate_rdrand(IR1_INST *pir1)
     latxs_tr_gen_call_to_helper_epilogue_cfg(nofp_helper_cfg);
     /* store return val */
     latxs_store_ir2_to_ir1(&latxs_ret0_ir2_opnd, opnd0);
+    /* The shared helper reports success in cc_src. */
+    latxs_tr_load_eflags();
 
     if (td->sys.cflags & CF_USE_ICOUNT) {
         latxs_tr_gen_io_end();
@@ -3995,8 +4008,10 @@ bool latxs_translate_rdrand(IR1_INST *pir1)
 bool latxs_translate_popcnt(IR1_INST *pir1)
 {
     TRANSLATION_DATA *td = lsenv->tr_data;
-    if (!(td->sys.cpuid_ext_features & CPUID_EXT_SSE42))
-        assert(0);
+    if (!(td->sys.cpuid_ext_features & CPUID_EXT_POPCNT)) {
+        latxs_tr_gen_excp_illegal_op(pir1, 1);
+        return true;
+    }
 
     IR2_OPND src_opnd = latxs_ra_alloc_itemp();
     latxs_load_ir1_to_ir2(&src_opnd, ir1_get_opnd(pir1, 1), EXMode_Z);

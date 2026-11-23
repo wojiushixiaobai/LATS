@@ -13,6 +13,12 @@
 #include "sys-excp.h"
 #include "sys-aot.h"
 #include "latx-sys-hamt-dmw.h"
+#if defined(CONFIG_SOFTMMU) && defined(CONFIG_LATX_HACK_MEM)
+#include "exec/cpu_ldst.h"
+#include "exec/ram_addr.h"
+#include "hamt-ptw.h"
+#include "tcg/helper-tcg.h"
+#endif
 
 static int check_icount_mode(void)
 {
@@ -28,6 +34,128 @@ static int check_icount_mode(void)
         return 0;
     }
 }
+
+#if defined(CONFIG_SOFTMMU) && defined(CONFIG_LATX_HACK_MEM)
+static uintptr_t rep_ram_ptr(CPUX86State *env, int mmu_idx,
+                            vaddr addr, MMUAccessType access)
+{
+    CPUTLBEntry *entry = tlb_entry(env, mmu_idx, addr);
+
+    if (tlb_read_idx(entry, access) != (addr & TARGET_PAGE_MASK)) {
+        return 0;
+    }
+    uintptr_t host = addr + entry->addend;
+    if ((host & HACK_RAMBASE_MASK) != HACK_RAMBASE) {
+        return 0;
+    }
+    ram_addr_t offset = host & ~HACK_RAMBASE;
+    bool regular_ram = latx_hack_gpa_in_ram(offset) && !paddr_in_vram(offset);
+
+    if (!regular_ram ||
+        (access == MMU_DATA_STORE && hamt_ptwdata_get_page(offset))) {
+        return 0;
+    }
+    return host;
+}
+
+/* Fill only the next byte the instruction would attempt. A failed walk
+ * does not deliver an exception here, and special mappings stay slow. */
+static bool rep_ram_fill_next(CPUState *cpu, CPUX86State *env, int mmu_idx,
+                              vaddr addr, MMUAccessType access)
+{
+    CPUTLBEntry *entry = tlb_entry(env, mmu_idx, addr);
+    if (!tlb_hit_page(tlb_read_idx(entry, access), addr & TARGET_PAGE_MASK)) {
+        int saved_error = env->error_code;
+        bool filled = x86_cpu_tlb_fill(cpu, addr, 1, access, mmu_idx, true, 0);
+        env->error_code = saved_error;
+        if (!filled) {
+            return false;
+        }
+    }
+    return rep_ram_ptr(env, mmu_idx, addr, access) != 0;
+}
+
+static void latxs_rep_ram(CPUX86State *env, int copying)
+{
+    CPUState *cpu = env_cpu(env);
+    CPUTLB *tlb = env_tlb(env);
+    int mmu_idx = cpu_mmu_index(env, false);
+    uint64_t count = env->regs[R_ECX];
+    vaddr dst = env->regs[R_EDI];
+    vaddr src = env->regs[R_ESI];
+    uint64_t advanced = 0;
+
+    if ((env->hflags & (HF_CPL_MASK | HF_CS64_MASK)) != HF_CS64_MASK ||
+        (env->hflags & (HF_GUEST_MASK | HF_SMM_MASK)) ||
+        (env->cr[0] & CR0_CD_MASK) ||
+        !(env->msr_ia32_misc_enable & UINT64_C(1)) || /* Fast-Strings Enable */
+        env->df != 1 || (env->eflags & (TF_MASK | RF_MASK)) ||
+        cpu_plugin_mem_cbs_enabled(cpu)) {
+        return;
+    }
+    /* Each chunk is permission-checked and stays within its RAM pages.
+     * Keep the TLB lock across it so a code-protection sweep cannot finish
+     * while this vCPU is still writing through the old mapping. */
+    while (count >= 256 && advanced < 16 * TARGET_PAGE_SIZE) {
+        size_t chunk = MIN(count, TARGET_PAGE_SIZE - (dst & ~TARGET_PAGE_MASK));
+        if (copying) {
+            chunk = MIN(chunk, TARGET_PAGE_SIZE - (src & ~TARGET_PAGE_MASK));
+        }
+        /* Preserve the MOVS source-before-destination access order. */
+        if ((copying && !rep_ram_fill_next(cpu, env, mmu_idx, src, MMU_DATA_LOAD)) ||
+            !rep_ram_fill_next(cpu, env, mmu_idx, dst, MMU_DATA_STORE)) {
+            break;
+        }
+        qemu_spin_lock(&tlb->c.lock);
+        uintptr_t dst_host = rep_ram_ptr(env, mmu_idx, dst, MMU_DATA_STORE);
+        uintptr_t src_host = copying ?
+            rep_ram_ptr(env, mmu_idx, src, MMU_DATA_LOAD) : 0;
+        bool overlap = copying &&
+                       (dst_host - src_host < chunk || src_host - dst_host < chunk);
+        if (!dst_host || (copying && !src_host) || overlap) {
+            qemu_spin_unlock(&tlb->c.lock);
+            break;
+        }
+        if (copying) {
+            memcpy((void *)dst_host, (void *)src_host, chunk);
+            src += chunk;
+        } else {
+            memset((void *)dst_host, (uint8_t)env->regs[R_EAX], chunk);
+        }
+        qemu_spin_unlock(&tlb->c.lock);
+        dst += chunk;
+        count -= chunk;
+        advanced += chunk;
+    }
+    env->regs[R_ECX] = count;
+    env->regs[R_EDI] = dst;
+    env->regs[R_ESI] = src;
+}
+
+static void latxs_gen_rep_ram(IR1_INST *pir1, bool copying)
+{
+    const TranslationBlock *tb = lsenv->tr_data->curr_tb;
+    if ((tb->flags & (HF_CPL_MASK | HF_CS64_MASK)) != HF_CS64_MASK ||
+        (tb->cflags & (CF_SINGLE_STEP | CF_MEMI_ONLY)) ||
+        !latxs_ir1_has_prefix_rep(pir1) || latxs_ir1_has_prefix_seg(pir1) ||
+        latxs_ir1_addr_size(pir1) != 8 ||
+        ir1_opnd_size(ir1_get_opnd(pir1, 0)) != 8 ||
+        !can_do_hamt(lsenv->cpu_state) || check_icount_mode() ||
+        option_sys_aot || option_aot_save || jit_tu_enabled()) {
+        return;
+    }
+
+    IR2_OPND count = latxs_ra_alloc_gpr(ecx_index);
+    IR2_OPND limit = latxs_ra_alloc_itemp();
+    IR2_OPND slow = la_new_label();
+    la_imm(&limit, 256);
+    la_out3(LISA_BLTU, &count, &limit, &slow);
+    latxs_ra_free_temp(&limit);
+    latxs_tr_gen_call_to_helper2_cfg((ADDR)latxs_rep_ram, copying,
+                                    default_helper_cfg, 0);
+    la_out1(LISA_LABEL, &slow);
+}
+#endif
 
 void latxs_sys_string_register_ir1(void)
 {
@@ -572,6 +700,9 @@ bool latxs_translate_outs(IR1_INST *pir1)
 
 bool latxs_translate_movs(IR1_INST *pir1)
 {
+#if defined(CONFIG_SOFTMMU) && defined(CONFIG_LATX_HACK_MEM)
+    latxs_gen_rep_ram(pir1, true);
+#endif
     IR1_OPND *opnd0 = ir1_get_opnd(pir1, 0); /* dest: MEM(ES:(E/R)DI) */
     IR1_OPND *opnd1 = ir1_get_opnd(pir1, 1); /* src : MEM(DS:(E/R)SI) */
 
@@ -850,6 +981,9 @@ bool latxs_translate_lods(IR1_INST *pir1)
 
 bool latxs_translate_stos(IR1_INST *pir1)
 {
+#if defined(CONFIG_SOFTMMU) && defined(CONFIG_LATX_HACK_MEM)
+    latxs_gen_rep_ram(pir1, false);
+#endif
     IR1_OPND *opnd0 = ir1_get_opnd(pir1, 0); /* dest: MEM(ES:(E/R)DI) */
     IR1_OPND *opnd1 = ir1_get_opnd(pir1, 1); /* src : AL, AX, EAX     */
 

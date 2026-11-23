@@ -22,6 +22,7 @@
 #include "exec/exec-all.h"
 #include "tcg/helper-tcg.h"
 #include "tcg/fast-itlb.h"
+#include "latx-options.h"
 
 #include "sysemu/rr.h"
 #include "exec/ram_addr.h"
@@ -862,14 +863,16 @@ bool x86_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
                                 out.paddr & TARGET_PAGE_MASK,
                                 cpu_get_mem_attrs(env),
                                 out.prot, mmu_idx, out.page_size);
-        if (access_type == MMU_INST_FETCH) {
-            int mmu_idx = cpu_mmu_index(env, false);
+        if (access_type == MMU_INST_FETCH && option_fast_itlb) {
             CPUTLBEntry *entry = tlb_entry(env, mmu_idx, addr);
             uint64_t tlb_addr = tlb_read_idx(entry, access_type);
-            if (tlb_hit(tlb_addr, addr)) {
-                void *p = (void *)addr + entry->addend;
-                uint64_t tb_page_addr = qemu_ram_addr_from_host_nofail(p);
-                cpu_fast_itlb_fill(cs, mmu_idx, addr, tb_page_addr, out.prot);
+            if (tlb_addr == (addr & TARGET_PAGE_MASK)) {
+                void *p = (void *)((uintptr_t)addr + entry->addend);
+                ram_addr_t tb_page_addr = qemu_ram_addr_from_host(p);
+
+                if (tb_page_addr != RAM_ADDR_INVALID) {
+                    cpu_fast_itlb_fill(cs, mmu_idx, addr, tb_page_addr, out.prot);
+                }
             }
         }
         return true;

@@ -300,7 +300,7 @@ typedef enum aot_rel_kind {
     HELPER_GET_DR,
     HELPER_HLT,
     HELPER_IDIVQ_EAX,
-    HELPER_IDT_CACHE_CLEAR,
+    HELPER_AVX_FP, /* reserved helper slot reused for the AVX slow path */
     HELPER_INB,
     HELPER_INL,
     HELPER_INTO,

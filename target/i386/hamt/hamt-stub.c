@@ -66,6 +66,11 @@ bool hamt_switch_pcid(struct CPUArchState *env, uint64_t cr3, bool noflush)
     return false;
 }
 
+bool hamt_invalidate_single_pcid(struct CPUArchState *env, unsigned pcid)
+{
+    return false;
+}
+
 void hamt_flush_tlb_all(void)
 {
 }

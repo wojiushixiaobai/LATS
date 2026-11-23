@@ -7,6 +7,13 @@
 #ifndef _LATX_INTB_SYS_H_
 #define _LATX_INTB_SYS_H_
 
+#if defined(CONFIG_SOFTMMU) && defined(CONFIG_LATX_HACK_MEM) && defined(NDEBUG)
+#define LATX_SUPERVISOR_DISPATCH_BITS 14
+extern TranslationBlock *latx_supervisor_dispatch[1 << LATX_SUPERVISOR_DISPATCH_BITS];
+bool latx_supervisor_dispatch_enabled(void);
+void latx_supervisor_dispatch_flush(void);
+#endif
+
 #define LATXS_INTB_LINK_ENABLE
 #define LATXS_INTB_LINK_OPTION_CHECK
 

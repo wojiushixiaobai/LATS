@@ -5720,9 +5720,24 @@ uint64_t x86_cpu_get_supported_feature_word(FeatureWord w,
             }
         }
 #endif
-        if (w == FEAT_8000_0007_EDX && qemu_tcg_mode_2_lat()) {
-            /* LATX uses LoongArch's fixed-rate, shared counter. */
-            r |= CPUID_APM_INVTSC;
+        if (qemu_tcg_mode_2_lat()) {
+            switch (w) {
+            case FEAT_1_ECX:
+                r &= ~(CPUID_EXT_AVX | CPUID_EXT_FMA | CPUID_EXT_F16C);
+                break;
+            case FEAT_7_0_EBX:
+                r &= ~CPUID_7_0_EBX_AVX2;
+                break;
+            case FEAT_7_0_ECX:
+                r &= ~CPUID_7_0_ECX_VAES;
+                break;
+            case FEAT_8000_0007_EDX:
+                /* LATX uses LoongArch's fixed-rate, shared counter. */
+                r |= CPUID_APM_INVTSC;
+                break;
+            default:
+                break;
+            }
         }
     } else {
         return ~0;

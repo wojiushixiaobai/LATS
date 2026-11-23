@@ -19,6 +19,7 @@ CFLAGS+=-nostdlib -ggdb -O0 $(MINILIB_INC)
 LDFLAGS+=-static -nostdlib $(CRT_OBJS) $(MINILIB_OBJS) -lgcc
 
 TESTS+=$(MULTIARCH_TESTS)
+TESTS+=xstate
 EXTRA_RUNS+=$(MULTIARCH_RUNS)
 
 # building head blobs
@@ -26,6 +27,28 @@ EXTRA_RUNS+=$(MULTIARCH_RUNS)
 
 %.o: $(CRT_PATH)/%.S
 	$(CC) $(CFLAGS) $(EXTRA_CFLAGS) -c $< -o $@
+
+xstate avx-native-faults: %: $(CRT_PATH)/%.S $(LINK_SCRIPT) $(CRT_OBJS)
+	$(CC) $(CFLAGS) $(EXTRA_CFLAGS) $< -o $@ $(LDFLAGS)
+
+XSTATE_CPU = Penryn,+xsave,+xsaveopt,+pclmulqdq,+aes,+rdrand,+rdseed,+popcnt,enforce
+XSTATE_HAMT = 0
+ifeq ($(CONFIG_LATX_TCG_MODE),y)
+XSTATE_CPU := $(XSTATE_CPU),+avx,+avx2
+endif
+
+run-xstate run-xstate-native-avx: xstate
+run-avx-native-faults: avx-native-faults
+run-xstate run-xstate-native-avx run-avx-native-faults:
+	$(call run-test, $<, $(QEMU) -L $(SRC_PATH)/pc-bios \
+		-machine pc -nodefaults -display none -no-reboot \
+		-latx select$(COMMA)hamt=$(XSTATE_HAMT)$(COMMA)aotsys=0$(COMMA)tumode=off \
+		-cpu $(XSTATE_CPU) \
+		-device isa-debug-exit$(COMMA)iobase=0xf4$(COMMA)iosize=0x4 \
+		-kernel $<; test $$? -eq 33)
+
+# Exercise the implemented subset without changing normal CPU discovery.
+run-xstate-native-avx run-avx-native-faults: XSTATE_CPU = Penryn,+xsave,+xsaveopt,+pclmulqdq,+aes,+rdrand,+rdseed,+popcnt,+avx,+avx2,x-force-features=on
 
 # Build and link the tests
 %: %.c $(LINK_SCRIPT) $(CRT_OBJS) $(MINILIB_OBJS)
