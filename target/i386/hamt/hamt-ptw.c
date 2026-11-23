@@ -137,9 +137,8 @@ void *hamt_get_ptwdata1m(void)
 /* Diagnostic candidate: fail closed before any protection-table overflow. */
 static void checked_ptw_range(uint64_t base, uint64_t size)
 {
-    uint64_t first = base >> 12;
-    uint64_t pages = (size >> 12) + ((size & 4095) != 0);
-    if (first > ptwdata_size || pages > ptwdata_size - first) {
+    uint64_t limit = ptwdata_size << 12;
+    if (size && (base >= limit || size > limit - base)) {
         fprintf(stderr, "HAMT protection range out of bounds: base=%" PRIx64 " size=%" PRIx64 " entries=%" PRIx64 "\n", base, size, ptwdata_size);
         abort();
     }
@@ -147,9 +146,14 @@ static void checked_ptw_range(uint64_t base, uint64_t size)
 
 void hamt_ptwdata_set_mmio(uint64_t base, uint64_t size)
 {
-    checked_ptw_range(base, size);
-    size += TARGET_PAGE_SIZE - 1;
-    memset(ptwdata + (base >> 12), 1, (size >> 12));
+    uint64_t limit = ptwdata_size << 12;
+    if (!size || base >= limit) {
+        if (size) fprintf(stderr, "HAMT MMIO outside protection map: base=%" PRIx64 " size=%" PRIx64 "\n", base, size);
+        return;
+    }
+    size = MIN(size, limit - base);
+    uint64_t pages = ((base & 4095) + size + 4095) >> 12;
+    memset(ptwdata + (base >> 12), 1, pages);
 }
 
 void hamt_ptwdata_smc_protect(uint64_t base, uint64_t size)
