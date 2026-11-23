@@ -154,6 +154,7 @@ meson_options_help() {
   printf "%s\n" '  qga-vss         build QGA VSS support (broken with MinGW)'
   printf "%s\n" '  rbd             Ceph block device driver'
   printf "%s\n" '  rdma            Enable RDMA-based migration'
+  printf "%s\n" '  reims-vgpu      experimental Reims graphics device (LoongArch LATS)'
   printf "%s\n" '  replication     replication support'
   printf "%s\n" '  sdl             SDL user interface'
   printf "%s\n" '  sdl-image       SDL Image support for icons'
@@ -418,6 +419,8 @@ _meson_option_parse() {
     --disable-rbd) printf "%s" -Drbd=disabled ;;
     --enable-rdma) printf "%s" -Drdma=enabled ;;
     --disable-rdma) printf "%s" -Drdma=disabled ;;
+    --enable-reims-vgpu) printf "%s" -Dreims_vgpu=enabled ;;
+    --disable-reims-vgpu) printf "%s" -Dreims_vgpu=disabled ;;
     --enable-replication) printf "%s" -Dreplication=enabled ;;
     --disable-replication) printf "%s" -Dreplication=disabled ;;
     --enable-rng-none) printf "%s" -Drng_none=true ;;

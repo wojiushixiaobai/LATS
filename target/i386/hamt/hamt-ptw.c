@@ -134,31 +134,47 @@ void *hamt_get_ptwdata1m(void)
     return ptwdata1m;
 }
 
+/* Diagnostic candidate: fail closed before any protection-table overflow. */
+static void checked_ptw_range(uint64_t base, uint64_t size)
+{
+    uint64_t first = base >> 12;
+    uint64_t pages = (size >> 12) + ((size & 4095) != 0);
+    if (first > ptwdata_size || pages > ptwdata_size - first) {
+        fprintf(stderr, "HAMT protection range out of bounds: base=%" PRIx64 " size=%" PRIx64 " entries=%" PRIx64 "\n", base, size, ptwdata_size);
+        abort();
+    }
+}
+
 void hamt_ptwdata_set_mmio(uint64_t base, uint64_t size)
 {
+    checked_ptw_range(base, size);
     size += TARGET_PAGE_SIZE - 1;
     memset(ptwdata + (base >> 12), 1, (size >> 12));
 }
 
 void hamt_ptwdata_smc_protect(uint64_t base, uint64_t size)
 {
+    checked_ptw_range(base, size);
     size += TARGET_PAGE_SIZE - 1;
     memset(ptwdata + (base >> 12), 1, (size >> 12));
 }
 void hamt_ptwdata_smc_unprotect(uint64_t base, uint64_t size)
 {
+    checked_ptw_range(base, size);
     size += TARGET_PAGE_SIZE - 1;
     memset(ptwdata + (base >> 12), 0, (size >> 12));
 }
 
 void hamt_ptwdata_vga_protect(uint64_t base, uint64_t size)
 {
+    checked_ptw_range(base, size);
     g_assert(!hamt_no_vga_dirty());
     size += TARGET_PAGE_SIZE - 1;
     memset(ptwdata + (base >> 12), 4, (size >> 12));
 }
 void hamt_ptwdata_vga_unprotect(uint64_t base, uint64_t size)
 {
+    checked_ptw_range(base, size);
     g_assert(!hamt_no_vga_dirty());
     size += TARGET_PAGE_SIZE - 1;
     memset(ptwdata + (base >> 12), 0, (size >> 12));
@@ -166,6 +182,7 @@ void hamt_ptwdata_vga_unprotect(uint64_t base, uint64_t size)
 
 void hamt_ptwdata_smc_protect_page(uint64_t page)
 {
+    checked_ptw_range(page, 1);
     int old = qatomic_cmpxchg__nocheck(&(ptwdata[(page >> 12)]), 0, 2);
     if (old == 0) {
         lsassertm(ptwdata1m[(page >> 20)] < 256,
@@ -179,6 +196,7 @@ void hamt_ptwdata_smc_protect_page(uint64_t page)
 }
 void hamt_ptwdata_smc_unprotect_page(uint64_t page)
 {
+    checked_ptw_range(page, 1);
     int old = qatomic_cmpxchg__nocheck(&(ptwdata[(page >> 12)]), 2, 0);
     if (old == 2) {
         lsassertm(ptwdata1m[(page >> 20)] > 0,
@@ -192,20 +210,24 @@ void hamt_ptwdata_smc_unprotect_page(uint64_t page)
 }
 uint8_t hamt_ptwdata_get_page(uint64_t page)
 {
+    checked_ptw_range(page, 1);
     return ptwdata[(page >> 12)];
 }
 void hamt_ptwdata_set_page(uint64_t page, uint8_t v)
 {
+    checked_ptw_range(page, 1);
     ptwdata[(page >> 12)] = v;
 }
 
 bool hamt_ptwdata_smc_page_is_protected(uint64_t page)
 {
+    checked_ptw_range(page, 1);
     return ptwdata[(page >> 12)] == 2;
 }
 
 bool hamt_ptwdata_smc_range_is_protected(uint64_t base, uint64_t size)
 {
+    checked_ptw_range(base, size);
     uint64_t start = base >> TARGET_PAGE_BITS;
     uint64_t end = TARGET_PAGE_ALIGN(base + size) >> TARGET_PAGE_BITS;
     bool protected = false;
@@ -220,6 +242,7 @@ bool hamt_ptwdata_smc_range_is_protected(uint64_t base, uint64_t size)
 
 bool hamt_ptwdata_vga_range_is_protected(uint64_t base, uint64_t size)
 {
+    checked_ptw_range(base, size);
     g_assert(!hamt_no_vga_dirty());
     uint64_t start = base >> TARGET_PAGE_BITS;
     uint64_t end = TARGET_PAGE_ALIGN(base + size) >> TARGET_PAGE_BITS;
@@ -235,6 +258,7 @@ bool hamt_ptwdata_vga_range_is_protected(uint64_t base, uint64_t size)
 
 void hamt_ptwdata_vga_snapshot(uint64_t base, uint64_t size, uint8_t *dest)
 {
+    checked_ptw_range(base, size);
     g_assert(!hamt_no_vga_dirty());
     size += TARGET_PAGE_SIZE - 1;
     memcpy(dest, &ptwdata[base>>12], size>>12);
@@ -455,6 +479,7 @@ restart:
 
     /* Page table level 4 */
     pte_addr = ((pte & PG_ADDRESS_MASK) + (((addr >> 39) & 0x1ff) << 3));
+    checked_ptw_range(pte_addr, 8);
     haddr = pte_addr + rambase; /* HVA = GPA + rambase */
     pte = *((uint64_t *)haddr);
     if (!(pte & PG_PRESENT_MASK)) goto do_fault;
@@ -467,6 +492,7 @@ restart:
 
     /* Page table level 3 */
     pte_addr = ((pte & PG_ADDRESS_MASK) + (((addr >> 30) & 0x1ff) << 3));
+    checked_ptw_range(pte_addr, 8);
     haddr = pte_addr + rambase; /* HVA = GPA + rambase */
     pte = *((uint64_t *)haddr);
     if (!(pte & PG_PRESENT_MASK)) goto do_fault;
@@ -486,6 +512,7 @@ restart:
 
     /* Page table level 2 */
     pte_addr = ((pte & PG_ADDRESS_MASK) + (((addr >> 21) & 0x1ff) << 3));
+    checked_ptw_range(pte_addr, 8);
     haddr = pte_addr + rambase; /* HVA = GPA + rambase */
     pte = *((uint64_t *)haddr);
     if (!(pte & PG_PRESENT_MASK)) goto do_fault;
@@ -505,6 +532,7 @@ restart:
 
     /* Page table level 1 */
     pte_addr = ((pte & PG_ADDRESS_MASK) + (((addr >> 12) & 0x1ff) << 3));
+    checked_ptw_range(pte_addr, 8);
     haddr = pte_addr + rambase; /* HVA = GPA + rambase */
     pte = *((uint64_t *)haddr);
     if (!(pte & PG_PRESENT_MASK)) goto do_fault;
@@ -544,6 +572,12 @@ do_check_protect:
     haddr = paddr + rambase;
 
     uint8_t *ptwdata = hamt_get_ptwdata();
+    /* Out-of-range guest addresses may be device memory.  Let the normal
+     * QEMU translation resolve them; never index beyond the protection map. */
+    if ((paddr >> 12) >= ptwdata_size) {
+        ptwerror->error = HAMT_PTW_ERROR_NOTRAM;
+        goto returnfalse;
+    }
     assert(ptwdata == env->ptw4k);
     if (ptwdata[paddr >> 12] == 1) {
 #ifdef CONFIG_LATX_PRINT

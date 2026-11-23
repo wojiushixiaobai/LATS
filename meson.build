@@ -614,6 +614,16 @@ have_vhost_net = have_vhost_net_kernel or have_vhost_net_user or have_vhost_net_
 # Target-specific libraries and flags
 libm = cc.find_library('m', required: false)
 threads = dependency('threads')
+reims_vgpu = dependency('reims-vgpu', method: 'pkg-config', static: true,
+                        required: get_option('reims_vgpu'))
+if reims_vgpu.found() and (targetos != 'linux' or host_arch != 'loongarch64' or
+                           target_dirs != ['x86_64-softmmu'])
+  error('Reims LATS support requires a Linux LoongArch host and only x86_64-softmmu')
+endif
+if reims_vgpu.found() and not config_host.has_key('CONFIG_LATX_HACK_MEM')
+  error('Reims LATS support requires --enable-latx-hack-mem')
+endif
+
 util = cc.find_library('util', required: false)
 winmm = []
 socket = []
@@ -3739,6 +3749,12 @@ foreach target : target_dirs
     arch_deps += hw.dependencies()
 
     arch_srcs += config_devices_h[target]
+    if reims_vgpu.found()
+      arch_srcs += files('hw/display/reims/reims-graphics-pci.c',
+                         'hw/display/reims/host-pthread.c')
+      arch_deps += reims_vgpu
+      link_args += ['-Wl,--wrap=pthread_create']
+    endif
     link_args += ['@block.syms', '@qemu.syms']
 
     if target_base_arch == 'i386' and host_arch == 'loongarch64'

@@ -36,9 +36,9 @@ uint64_t latx_hack_ram_above_4g_end;
 uint64_t latx_hack_mem_backend_extra_size(void)
 {
     /* High RAM aliases start at the 4 GiB backend offset.  Reserve the
-     * largest PC low-memory hole used by the supported layouts so custom
-     * below-4G splits cannot truncate the alias. */
-    return (uint64_t)2 << 30;
+     * full 4 GiB low address range so a split as low as 1 GiB, required
+     * by the Reims 1 GiB BAR, cannot truncate the alias. */
+    return (uint64_t)4 << 30;
 }
 
 void latx_hack_mem_set_layout(uint64_t below_4g_end,
