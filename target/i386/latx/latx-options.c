@@ -156,6 +156,8 @@ int option_aes_opt;
 int option_enable_lasx;
 
 int option_common_slowpath;
+int option_softmmu_pcaddi_cold;
+int option_softmmu_rmw_reuse;
 int option_new_assemble;
 
 int option_large_code_cache;
@@ -787,6 +789,14 @@ QemuOptsList qemu_latx_opts = {
             .type = QEMU_OPT_BOOL,
             .help = "common slow path for softmmu helper",
         }, {
+            .name = "smmupcaddi",
+            .type = QEMU_OPT_BOOL,
+            .help = "keep the softmmu slow-path pcaddi anchor in the cold path",
+        }, {
+            .name = "smmurmw",
+            .type = QEMU_OPT_BOOL,
+            .help = "experimental reuse of softmmu lookup for 64-bit ADD RMW",
+        }, {
             .name = "njc",
             .type = QEMU_OPT_BOOL,
             .help = "use Native Jmp Cache lookup",
@@ -1147,6 +1157,39 @@ static void latxs_options_check_sysflagtu(void)
     }
 }
 
+/*
+ * option smmupcaddi moves the per-access softmmu anchor from the hot path
+ * into a stub of the shared slow path emitted by
+ * tr_gen_softmmu_slow_path_common().  Two configurations cannot use it:
+ *
+ *  - comsmmu=off: there is no shared body/stub at all (each access gets its
+ *    own helper call), so the option is meaningless.  Force it off instead of
+ *    letting the dump report a setting that code generation ignores.
+ *
+ *  - TU/AOT-TU: in TU mode the old per-access pcaddi was already emitted only
+ *    on the miss direction of the branch, so this option saves no executed
+ *    instruction there (code size only), while the cold stub would have to
+ *    reach back across a whole TU with a PCADDI si20 displacement (fail-closed
+ *    abort above ~2 MiB of TU host code).  Keep it to ordinary TB mode, which
+ *    is where the per-access instruction saving exists.
+ */
+static void latxs_options_check_smmupcaddi(void)
+{
+    if (!option_softmmu_pcaddi_cold) {
+        return;
+    }
+    if (!option_common_slowpath) {
+        warn_report("smmupcaddi requires comsmmu=on; disabling smmupcaddi");
+        option_softmmu_pcaddi_cold = 0;
+        return;
+    }
+    if (tu_runtime_enabled()) {
+        warn_report("smmupcaddi has no TB-mode runtime benefit under TU/AOT "
+                    "TU; disabling smmupcaddi");
+        option_softmmu_pcaddi_cold = 0;
+    }
+}
+
 static void latxs_options_check_tu_hras(void)
 {
     if (option_tu_hras < 0 || option_tu_hras > 2) {
@@ -1278,6 +1321,7 @@ static void latx_sys_check_options(void)
     }
     latxs_options_check_fpe();
     latxs_options_check_sysflagtu();
+    latxs_options_check_smmupcaddi();
 
     if (option_aot_gpr_highbits && !aot_tu_enabled()) {
         fprintf(stderr, "WARNING: aotgprhb requires AOT TU "
@@ -1638,6 +1682,8 @@ void latx_parse_options(QemuOpts *opts)
     parse_options_bool("softfpu", option_soft_fpu);
     parse_options_uint("softfpu_fast", option_soft_fpu_fast);
     parse_options_bool("comsmmu", option_common_slowpath);
+    parse_options_bool("smmupcaddi", option_softmmu_pcaddi_cold);
+    parse_options_bool("smmurmw", option_softmmu_rmw_reuse);
     parse_options_bool("njc", option_intb_njc);
     parse_options_bool("njcinline", option_intb_njc_inline);
     parse_options_njcver(opts);
@@ -1976,6 +2022,10 @@ void dump_latxs_options(void)
     latx_options_printf("[LATX-SYS] -----------------------------------------------------\n");
     latx_options_printf("[LATX-SYS] static context switch = %d\n", option_staticcs);
     latx_options_printf("[LATX-SYS] common softmmu helper = %d\n", option_common_slowpath);
+    latx_options_printf("[LATX-SYS] softmmu pcaddi cold path = %d\n",
+                        option_softmmu_pcaddi_cold);
+    latx_options_printf("[LATX-SYS] softmmu RMW reuse = %d\n",
+                        option_softmmu_rmw_reuse);
     latx_options_printf("[LATX-SYS] flaged shadow hash table = %d\n", option_flaged_sht);
     latx_options_printf("[LATX-SYS] fast handle excep = %d\n", option_fast_excep);
     latx_options_printf("[LATX-SYS] -----------------------------------------------------\n");
@@ -2407,6 +2457,8 @@ void latxs_options_init(void)
     option_irq_gate_nobql = 0;
 #endif
     option_common_slowpath = 1; // comsmmu
+    option_softmmu_pcaddi_cold = 0; // smmupcaddi (experimental, default off)
+    option_softmmu_rmw_reuse = 0; // smmurmw (experimental, default off)
 
     /* ====== 4. Code Cache Configuration ====== */
     option_large_code_cache = 1; // largecc

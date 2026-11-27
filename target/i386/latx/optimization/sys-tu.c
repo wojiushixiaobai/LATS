@@ -3413,7 +3413,7 @@ static int latxs_label_dispose_in_tu(TranslationBlock **tb_list,
         ir2_current = ir2_get(ir2_id);
         ir2_opc = ir2_opcode(ir2_current);
 
-        if (latxs_ir2_opcode_is_branch(ir2_opc)) {
+        if (latxs_ir2_opcode_has_pcrel_label(ir2_opc)) {
 
             IR2_OPND *label_opnd = latxs_ir2_branch_get_label(ir2_current);
 
@@ -3428,8 +3428,23 @@ static int latxs_label_dispose_in_tu(TranslationBlock **tb_list,
                 int label_pos_ir2_num = label_pos[label_id];
 
                 if (label_pos_ir2_num != -1) {
-                    latxs_ir2_opnd_convert_label_to_imm(
-                            label_opnd, label_pos_ir2_num - ir2_num);
+                    latxs_ir2_resolve_pcrel_label(ir2_current, label_opnd,
+                            label_pos_ir2_num - ir2_num);
+                } else if (ir2_opc == LISA_PCADDI) {
+                    /*
+                     * PCADDI only carries a label here as the softmmu
+                     * cold-anchor back-pointer, and that label is emitted in
+                     * the same IR2 stream as this instruction.  A missing
+                     * label therefore means a slow-path record survived the
+                     * discard of the IR2 array it was created with; encoding
+                     * the label id as si20 would point a3 at an arbitrary
+                     * window and make helper_softmmu_common decode a wrong
+                     * access.  Fail closed instead.
+                     */
+                    fprintf(stderr,
+                            "IR2: LISA_PCADDI label %d was not disposed\n",
+                            label_id);
+                    abort();
                 }
                 /* If label_pos_ir2_num is -1, it means this label
                  * is not inserted into the ir2 array.
@@ -3727,6 +3742,7 @@ int translate_tb_in_tu(uint32 tb_num_in_tu, TranslationBlock **tb_list)
         typeof(tu_data->eflag_opt_data) saved_eflag_opt_data =
             tu_data->eflag_opt_data;
         uint64_t ghbr_checkpoint = latxs_ghbr_stats_checkpoint();
+        int slow_path_nr_saved = 0;
 
 retranslate_one_tb_in_tu:
         g_clear_pointer(&td->hras_direct_call, g_free);
@@ -3776,15 +3792,20 @@ retranslate_one_tb_in_tu:
                 }
             }
 
-            /* record current ir2 position */
+            /* record current ir2 position (and the slow-path records that
+             * belong to it: a discarded attempt's records must not emit
+             * orphaned cold-path stubs pointing at labels that only exist in
+             * the discarded IR2 range) */
+            slow_path_nr_saved = td->slow_path_rcd_nr;
             latxs_td_ir2_position_save(td);
 
             latxs_tr_ir2_generate_in_tu(tb);
 
             if (td->avoid_tu_eflag_opt == AVOID_TUEF_START) {
                 td->avoid_tu_eflag_opt = AVOID_TUEF_VALID;
-                /* restore ir2 position */
+                /* restore ir2 position and the matching slow-path records */
                 latxs_td_ir2_position_restore(td);
+                td->slow_path_rcd_nr = slow_path_nr_saved;
                 /* reset instptn eflag optimization */
                 tb->ptn.eflag_type = PTN_EFLAG_TYPE_INVALID;
                 tu_data->eflag_opt_data = saved_eflag_opt_data;

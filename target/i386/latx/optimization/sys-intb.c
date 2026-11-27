@@ -116,8 +116,19 @@ static void gen_latxs_supervisor_dispatch(IR2_OPND *tb, IR2_OPND *tmp0,
     la_imm(tmp0, tlb_fast);
     la_out3(LISA_ADD_D, tmp0, &la_env, tmp0);
     la_out2i(LISA_LD_D, tmp1, tmp0, offsetof(CPUTLBDescFast, mask));
-    la_out2i(LISA_LD_D, tmp0, tmp0, offsetof(CPUTLBDescFast, table));
-    latxs_tr_dmw_in_fix_mem(tmp0);
+    if (hamt_enabled() && hamt_mode_dmw()) {
+        /*
+         * DMW fast path: load the pre-tagged alias maintained by cputlb.c
+         * (see latx_tlb_table_dmw_sync()) instead of tagging the raw table
+         * pointer here.  Same value, one Lu52i less on every supervisor
+         * dispatch lookup.
+         */
+        la_out2i(LISA_LD_D, tmp0, tmp0,
+                 offsetof(CPUTLBDescFast, table_dmw));
+    } else {
+        la_out2i(LISA_LD_D, tmp0, tmp0, offsetof(CPUTLBDescFast, table));
+        latxs_tr_dmw_in_fix_mem(tmp0);
+    }
     la_out2i(LISA_SRLI_D, ret, pc, TARGET_PAGE_BITS - CPU_TLB_ENTRY_BITS);
     la_out3(LISA_AND, tmp1, tmp1, ret);
     la_out3(LISA_ADD_D, tmp0, tmp0, tmp1);

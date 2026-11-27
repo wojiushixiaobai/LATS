@@ -258,7 +258,7 @@ void latxs_label_dispose(const void *code_buffer)
         ir2_current = ir2_get(ir2_id);
         ir2_opc = ir2_opcode(ir2_current);
 
-        if (latxs_ir2_opcode_is_branch(ir2_opc)) {
+        if (latxs_ir2_opcode_has_pcrel_label(ir2_opc)) {
 
             IR2_OPND *label_opnd = latxs_ir2_branch_get_label(ir2_current);
 
@@ -276,8 +276,8 @@ void latxs_label_dispose(const void *code_buffer)
                         "label %d is not inserted\n",
                          label_id);
 
-                latxs_ir2_opnd_convert_label_to_imm(
-                        label_opnd, label_pos_ir2_num - ir2_num);
+                latxs_ir2_resolve_pcrel_label(ir2_current, label_opnd,
+                        label_pos_ir2_num - ir2_num);
             }
         }
 

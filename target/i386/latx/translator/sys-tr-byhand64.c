@@ -1475,6 +1475,20 @@ static void __tr_byhand64_addsub_mem_gpr(IR1_INST *pir1, int is_add)
     int mem_imm, opnd_size;
     opnd_size = ir1_opnd_size(opnd0);
     latxs_get_mem_opnd(&mem_opnd, &mem_imm, opnd0, -1);
+#ifdef CONFIG_SOFTMMU
+    bool reuse = opnd_size == 64 &&
+                 latxs_softmmu_rmw_reuse_eligible(pir1);
+    IR2_OPND rmw_valid = latxs_invalid_ir2_opnd;
+    if (reuse) {
+        /* Translation-only diagnostic; it does not instrument the hot path. */
+        if (getenv("LATS_SMMURMW_LOG")) {
+            fprintf(stderr, "[LATX-SYS] smmurmw translated pc=%#llx\n",
+                    (unsigned long long)pir1->info->address);
+        }
+        rmw_valid = latxs_ra_alloc_itemp();
+        latxs_softmmu_rmw_load64(&tmp0, &mem_opnd, mem_imm, &rmw_valid);
+    } else
+#endif
     la_ld_by_op_size(tmp0, mem_opnd, mem_imm, opnd_size, EXMode_S);
 
 
@@ -1494,6 +1508,12 @@ static void __tr_byhand64_addsub_mem_gpr(IR1_INST *pir1, int is_add)
         latxs_append_ir2_opnd3(cal, &dest, &tmp0, &tmp1);
     }
 
+#ifdef CONFIG_SOFTMMU
+    if (reuse) {
+        latxs_softmmu_rmw_store64(&dest, &mem_opnd, mem_imm, &rmw_valid);
+        latxs_ra_free_temp(&rmw_valid);
+    } else
+#endif
     la_st_by_op_size(dest, mem_opnd, mem_imm, opnd_size);
     latxs_ra_free_temp(&mem_opnd);
 

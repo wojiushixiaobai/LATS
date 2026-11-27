@@ -47,7 +47,12 @@ QEMU_BUILD_BUG_ON(sizeof(CPUTLBEntry) != (1 << CPU_TLB_ENTRY_BITS));
  * The structure is aligned to aid loading the pair with one insn.
  */
 typedef struct CPUTLBDescFast {
-    void *spt;
+    /*
+     * LATS: pre-DMW-tagged alias of @table for the generated x86 fast paths;
+     * the field was previously unused (named spt).  Kept in sync wherever
+     * @table is (re)allocated; see latx_tlb_table_dmw_sync() in cputlb.c.
+     */
+    void *table_dmw;
     void *itlb;
     /* Contains (n_entries - 1) << CPU_TLB_ENTRY_BITS */
     uintptr_t mask;

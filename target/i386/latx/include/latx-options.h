@@ -678,6 +678,10 @@ extern int option_aes_opt;
 extern int option_enable_lasx;
 
 extern int option_common_slowpath;
+/* Move the per-access soft-TLB-miss anchor (pcaddi a3) out of the hot
+ * fast path into the per-access cold stub.  Requires option_common_slowpath. */
+extern int option_softmmu_pcaddi_cold;
+extern int option_softmmu_rmw_reuse;
 extern int option_new_assemble;
 
 extern int option_large_code_cache;

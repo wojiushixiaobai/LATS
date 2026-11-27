@@ -152,6 +152,26 @@ bool latxs_ir2_opcode_is_branch(IR2_OPCODE opcode)
            (opcode >= LISA_B && opcode <= LISA_BGEU);
 }
 
+/*
+ * Instructions whose last operand may be an IR2 label that the label
+ * disposal pass rewrites into a PC-relative immediate:
+ *
+ *   - control-flow branches:  offs16 = (label_pos - imm_pos) instructions
+ *   - LISA_PCADDI:            si20   = (label_pos - imm_pos) instructions,
+ *                             rd = PC + sign_extend(si20 << 2) at run time.
+ *
+ * LISA_PCADDI is intentionally not reported by latxs_ir2_opcode_is_branch():
+ * it is not control flow and must not end a basic block.  It only shares the
+ * label-resolution machinery because LoongArch encodes its PC-relative
+ * displacement with the same "label - pc, in instruction units" convention
+ * that branches use for offs16.
+ */
+inline __attribute__ ((always_inline))
+bool latxs_ir2_opcode_has_pcrel_label(IR2_OPCODE opcode)
+{
+    return latxs_ir2_opcode_is_branch(opcode) || opcode == LISA_PCADDI;
+}
+
 inline __attribute__ ((always_inline))
 IR2_OPND latxs_ir2_opnd_new_inv(void)
 {
@@ -216,6 +236,32 @@ void latxs_ir2_opnd_convert_label_to_imm(IR2_OPND *opnd, int imm)
     opnd->val = imm;
 }
 
+/*
+ * Rewrite a PC-relative label operand into the immediate that LATS encodes.
+ *
+ * Control-flow branches store offs16 = (label_pc - branch_pc) >> 2.
+ * LISA_PCADDI stores si20 = (label_pc - pcaddi_pc) >> 2 and computes
+ * rd = PC + SignExtend(si20 << 2) at run time (LoongArch PCADDI semantics),
+ * so the very same instruction-unit displacement is encoded; it just has a
+ * wider field.  Reject out-of-range labels here (last point where the label
+ * position is known) instead of silently wrapping si20 during encoding.
+ *
+ * This is a translator invariant, not a guest-visible condition, so fail hard
+ * with a message rather than generating wrong code.
+ */
+inline __attribute__ ((always_inline))
+void latxs_ir2_resolve_pcrel_label(IR2_INST *pir2, IR2_OPND *label_opnd,
+        int disp)
+{
+    if (ir2_opcode(pir2) == LISA_PCADDI && !int32_in_int20(disp)) {
+        fprintf(stderr,
+                "IR2: LISA_PCADDI label displacement %d instructions does not "
+                "fit its si20 field (+/-524287 instructions, +/2MiB)\n", disp);
+        abort();
+    }
+    latxs_ir2_opnd_convert_label_to_imm(label_opnd, disp);
+}
+
 /* Functions to manage IR2 extension mode */
 inline __attribute__ ((always_inline))
 int latxs_ir2_opnd_is_mapping(IR2_OPND *opnd2, int *x86_gpr_num)
@@ -276,6 +322,10 @@ inline __attribute__ ((always_inline))
 int latxs_ir2_branch_label_index(IR2_INST *pir2)
 {
     IR2_OPCODE opc = ir2_opcode(pir2);
+    if (opc == LISA_PCADDI) {
+        /* LISA_PCADDI rd, si20: the PC-relative label is operand 1 */
+        return 1;
+    }
     lsassert(latxs_ir2_opcode_is_branch(opc));
     switch (opc) {
     case LISA_BEQZ:

@@ -294,10 +294,29 @@ typedef struct softmmu_slow_path_rcd {
 
     IR2_OPND label_slow_path;
     IR2_OPND label_exit;
+    /*
+     * option_softmmu_pcaddi_cold: label on the fast path immediately in front
+     * of the addend load.  The per-access cold stub materialises its address
+     * into a3 with "pcaddi a3, <label_fast_path>"; helper_softmmu_common uses
+     * that address as the instruction window that identifies the access.
+     * IR2_OPND_INV when the cold-path anchor is not in use.
+     */
+    IR2_OPND label_fast_path;
+
+    /* RMW lookup reuse: the load's cold stub clears this live itemp before
+     * entering the shared helper.  Invalid for ordinary accesses. */
+    IR2_OPND rmw_valid;
 
 } softmmu_sp_rcd_t;
 
 uint64_t helper_softmmu_common(CPUX86State *env);
+#ifdef CONFIG_SOFTMMU
+bool latxs_softmmu_rmw_reuse_eligible(IR1_INST *pir1);
+void latxs_softmmu_rmw_load64(IR2_OPND *dst, IR2_OPND *base, int offset,
+                              IR2_OPND *valid);
+void latxs_softmmu_rmw_store64(IR2_OPND *value, IR2_OPND *base, int offset,
+                               IR2_OPND *valid);
+#endif
 void gen_ldst_softmmu_helper(IR2_OPCODE op,
         IR2_OPND *opnd_gpr, IR2_OPND *mem_base, int mem_offset, int save_temp);
 void gen_ldst_c1_softmmu_helper(IR2_OPCODE op,
@@ -333,6 +352,24 @@ ADDR latxs_tr_cvt_cpu_addr_write(CPUX86State *, target_ulong, int *);
 ADDR latxs_tr_cvt_cpu_addr_code(CPUX86State *, target_ulong, int *);
 
 /* End of TB related functions */
+/*
+ * option sysflagtb: defer the TB-final fused compare+branch materialisation of
+ * M-EFLAGS to the two exit slow paths.  latxs_tr_tb_eflag_defer_begin() checks
+ * that both successors do not observe incoming flags and that both edges use
+ * the plain direct-link stub; it returns false when the caller must emit the
+ * flag producer inline as before.  latxs_tr_tb_eflag_defer_end() must follow
+ * the two latxs_tr_generate_exit_tb() calls.
+ */
+bool latxs_tr_tb_eflag_defer_begin(IR1_INST *branch, int opcode,
+        IR2_OPND *opnd0, IR2_OPND *opnd1, int n_operands);
+#ifdef CONFIG_LATX_TU
+/* Guest-byte-stream predicate: 1 iff the instruction stream at @pc defines
+ * all six OSZAPC flags before reading any flag (and before the first TB-ending
+ * instruction / page boundary / illegal instruction). */
+int latxs_tb_disasm_eflag_use_zero(TranslationBlock *tb, CPUState *cpu,
+        target_ulong pc, target_ulong cs_base, uint32_t flags, int cflags);
+#endif
+void latxs_tr_tb_eflag_defer_end(void);
 void latxs_tr_generate_exit_tb(IR1_INST *branch, int succ_id);
 void latxs_false_tr_generate_exit_tb(IR1_INST *branch, int succ_id);
 #ifdef CONFIG_LATX_TU

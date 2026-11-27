@@ -148,6 +148,25 @@ static void tb_jmp_cache_clear_page(CPUState *cpu, vaddr page_addr)
     tb_jmp_cache_flush_page(cpu, page_addr);
 }
 
+/*
+ * LATS: generated x86 fast paths load this pre-tagged table pointer instead of
+ * tagging CPUTLBDescFast.table after every load (Lu52i per memory access).
+ * Keep the alias in sync whenever the fast table is (re)allocated.
+ *
+ * Must live outside the CONFIG_LATX_RR guard below: that guard only disables
+ * dynamic TLB resizing, while tlb_mmu_init() is shared by every configuration.
+ */
+static void latx_tlb_table_dmw_sync(CPUTLBDescFast *fast)
+{
+#ifdef TARGET_I386
+    if (hamt_enabled() && hamt_mode_dmw()) {
+        fast->table_dmw = (void *)DMW_IN(fast->table);
+        return;
+    }
+#endif
+    fast->table_dmw = fast->table;
+}
+
 /**
  * tlb_mmu_resize_locked() - perform TLB resize bookkeeping; resize if necessary
  * @desc: The CPUTLBDesc portion of the TLB
@@ -262,6 +281,7 @@ static void tlb_mmu_resize_locked(CPUTLBDesc *desc, CPUTLBDescFast *fast,
         fast->table = g_try_new(CPUTLBEntry, new_size);
         desc->fulltlb = g_try_new(CPUTLBEntryFull, new_size);
     }
+    latx_tlb_table_dmw_sync(fast);
 }
 #endif
 
@@ -302,6 +322,7 @@ static void tlb_mmu_init(CPUArchState *env, int index,
     desc->n_used_entries = 0;
     fast->mask = (n_entries - 1) << CPU_TLB_ENTRY_BITS;
     fast->table = g_new(CPUTLBEntry, n_entries);
+    latx_tlb_table_dmw_sync(fast);
     fast->itlb = cpu_fast_itlb_base(env_cpu(env), index);
     desc->fulltlb = g_new(CPUTLBEntryFull, n_entries);
     tlb_mmu_flush_locked(env, desc, fast);
