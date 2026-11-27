@@ -542,6 +542,7 @@ static inline void __disable_dump_all(void)
 
 extern int option_sys_flag_reduction;
 extern int option_sys_flag_reduction_tu;
+extern int option_sys_flag_reduction_tb;
 #define FLAGRDTN_TU_PARSE_USE   (0x1 << 0)
 #define FLAGRDTN_TU_NEXT        (0x1 << 1)
 #define FLAGRDTN_TU_PARSE_USE2  (0x1 << 2)
@@ -591,6 +592,24 @@ static inline int flag_reduction_tu_test_xx_jcc(void) {
     return option_sys_flag_reduction_tu & FLAGRDTN_TU_TEST_XX_JCC; }
 static inline int flag_reduction_tu_need_recover(void) {
     return option_sys_flag_reduction_tu & FLAGRDTN_TU_NEED_RECOVER_MASK;
+}
+// bit 0: defer the TB-final fused compare+branch M-EFLAGS materialisation to
+// the TB exit slow paths (TB mode only).
+#define FLAGRDTN_TB_DEFER   (0x1 << 0)
+/*
+ * bit 1: additionally enable the HAMT in-flight-recovery protocol
+ * ($ra marker + entry clear + invalid-entry handler recovery).  This is
+ * validation-only: without it, sysflagtb is forcibly disabled under HAMT
+ * because a poisoned successor entry can be reached by a jump that already
+ * executed with deferred flags.  Do not default this on until the recovery
+ * protocol has passed the full guest correctness matrix.
+ */
+#define FLAGRDTN_TB_HAMT_RECOVER (0x1 << 1)
+static inline int flag_reduction_tb_defer(void) {
+    return option_sys_flag_reduction_tb & FLAGRDTN_TB_DEFER;
+}
+static inline int flag_reduction_tb_hamt_recover(void) {
+    return option_sys_flag_reduction_tb & FLAGRDTN_TB_HAMT_RECOVER;
 }
 static inline int flag_reduction_tu_add_jcc(void) {
     return option_sys_flag_reduction_tu & FLAGRDTN_TU_ADD_JCC; }

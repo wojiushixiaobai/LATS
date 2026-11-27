@@ -94,6 +94,11 @@ static void qemu_spin_unlock(pthread_mutex_t *p) { assert(!pthread_mutex_unlock(
 static void tb_set_jmp_target(TranslationBlock *a,int n,uintptr_t p) { (void)a;(void)n;(void)p; }
 static void latx_tb_set_jmp_target(TranslationBlock *a,int n,TranslationBlock *b) { (void)a;(void)n;(void)b; }
 static void latx_tb_reset_jmp_target(TranslationBlock *tb,int n) { (void)tb;(void)n; }
+/* P2 (option sysflagtb) hooks used by tb_add_jump(); the fixture does not
+ * model deferred M-EFLAGS so the veto is always permissive and the post-link
+ * invariant is a no-op. */
+static bool latx_tb_eflag_link_allowed(TranslationBlock *a,int n,TranslationBlock *b) { (void)a;(void)n;(void)b;return true; }
+static void latx_tb_eflag_stat_link(TranslationBlock *a,int n,TranslationBlock *b) { (void)a;(void)n;(void)b; }
 #define qemu_log_mask(...) ((void)0)
 '''
 

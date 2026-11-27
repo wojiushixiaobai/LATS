@@ -55,4 +55,7 @@ if (ir1_need_calculate_any_flag(pir1))
 const IR1_EFLAG_USEDEF *latxs_ir1_opcode_to_eflag_usedef(IR1_INST *ir1);
 IR1_EFLAG_USEDEF latxs_ir1_get_tu_eflag_usedef(IR1_INST *ir1);
 
+/* option sysflagtb: TB-mode per-TB incoming-flag usedef answer. */
+void __latxs_flag_reduction_tb_mode_parse_tb_use(TranslationBlock *tb);
+
 #endif

@@ -158,6 +158,22 @@ typedef struct TRANSLATION_DATA {
     uint32_t ptn_itemp_mask;
     IR2_OPND ptn_itemp0;
     IR2_OPND ptn_itemp1;
+    /*
+     * option sysflagtb: the TB-final fused compare+branch does not emit its
+     * M-EFLAGS materialisation inline.  It is recorded here and emitted by
+     * latxs_tr_generate_exit_tb() on the slow path of each of the two exit
+     * edges (after the direct-link slot and after the IRQ check label), so a
+     * taken direct link never pays it while every C exit still observes the
+     * architectural flags.
+     */
+    struct {
+        uint8_t valid;
+        uint8_t n_operands;      /* 1 (X86INC/X86DEC) or 2 */
+        uint8_t emitted;         /* exit edges that emitted the slow path */
+        int32_t opcode;          /* LISA_X86* flag producer */
+        IR2_OPND opnd0;
+        IR2_OPND opnd1;
+    } eflag_tb_defer;
     int avoid_tu_eflag_opt;
 #define AVOID_TUEF_NONE     0
 #define AVOID_TUEF_START    1

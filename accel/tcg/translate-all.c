@@ -619,6 +619,13 @@ static TranslationBlock *lat_tb_alloc(CPUState *cpu,
     tb->signal_unlink[0] = 0;
     tb->signal_unlink[1] = 0;
     tb->ptn.eflag_type = PTN_EFLAG_TYPE_INVALID;
+    /*
+     * option sysflagtb reuses the inert ptn payload: conservative defaults
+     * until target_latxs_host() publishes the real usedef answer.  A TB
+     * without a published answer can never receive a skip link.
+     */
+    tb->ptn.pcoffset = 0; /* use = "all flags observed", valid = 0 */
+    tb->ptn.os = 0;       /* no exit skips the materialisation */
 #ifdef CONFIG_LATX_DEBUG
     tb->inhibit_irq_type = 0;
 #endif

@@ -21,6 +21,42 @@
 target_ulong get_eip_cpu_state(TranslationBlock *tb);
 
 void latx_tb_set_jmp_target(struct TranslationBlock *, int, struct TranslationBlock *);
+/* option sysflagtb: tb_add_jump() veto for a deferred-eflags exit edge. */
+bool latx_tb_eflag_link_allowed(struct TranslationBlock *, int,
+                                struct TranslationBlock *);
+
+/*
+ * option sysflagtb runtime invariants (verification only; all updates are
+ * skipped when the option is off, which is the default, so a stock run is
+ * unaffected).  The counters are host-side except for MATERIALISE, which is
+ * incremented by an opt-in instruction sequence (LATS_SYSFLAGTB_STAT=1 at
+ * translation time) placed on the exit slow path immediately before the
+ * deferred flag producer.  They are printed once on QEMU exit.
+ */
+enum {
+    /* TBs translated with at least one edge that skips materialisation. */
+    LATX_TB_EFLAG_STAT_DEFER_TB,
+    /* skip bits recorded over those TBs (0..2 per TB). */
+    LATX_TB_EFLAG_STAT_DEFER_EDGE,
+    /* direct links actually installed on a skip edge. */
+    LATX_TB_EFLAG_STAT_LINK,
+    /* skip links refused: successor TB reads incoming flags. */
+    LATX_TB_EFLAG_STAT_VETO_USE,
+    /* skip links refused: successor TB usedef answer not published yet. */
+    LATX_TB_EFLAG_STAT_VETO_UNPUB,
+    /* exit slow paths that executed the deferred materialisation. */
+    LATX_TB_EFLAG_STAT_MATERIALISE,
+    LATX_TB_EFLAG_STAT_RECOVERED,
+    /* in-flight recovery looked at a nonzero $ra that was not a marker. */
+    LATX_TB_EFLAG_STAT_RECOVER_REJECT,
+    LATX_TB_EFLAG_STAT_NR,
+};
+extern uint64_t latx_tb_eflag_stats[LATX_TB_EFLAG_STAT_NR];
+void latx_tb_eflag_stat_defer(int edge_index);
+void latx_tb_eflag_stat_link(TranslationBlock *tb, int n,
+                             TranslationBlock *next_tb);
+/* Non-NULL only when the opt-in slow-path materialisation counter is on. */
+uint64_t *latx_tb_eflag_stat_materialise_counter(void);
 #if defined(CONFIG_LATX_TU) && defined(CONFIG_SOFTMMU)
 void *latxs_aot_direct_call_entry(struct TranslationBlock *, int,
                                   struct TranslationBlock *);

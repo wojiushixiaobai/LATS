@@ -19,6 +19,27 @@
 #include "latx-cp-counter.h"
 #include "latx-shadow-htable.h"
 #include "latx-sys-hamt-dmw.h"
+#include "latx-sys-smc-check.h"
+#include "latx-config.h"
+
+/*
+ * option sysflagtb verification (option-gated: the checks below are only
+ * reached when the option is enabled, which is off by default).  This uses a
+ * plain always-compiled check instead of lsassertm() because lsassertm() is
+ * compiled out unless CONFIG_LATX_DEBUG is defined, and the verification must
+ * also fire in the release build used by the single consolidated VM round.
+ * A violation is a correctness bug (stale M-EFLAGS or a missing slow path),
+ * so fail fast instead of corrupting guest state silently.
+ */
+#define SYSFLAGTB_CHECK(cond, ...)                                       \
+    do {                                                                 \
+        if (unlikely(!(cond))) {                                         \
+            fprintf(stderr, "[LATX-SYS] sysflagtb invariant failed at "  \
+                    "%s:%d: ", __func__, __LINE__);                      \
+            fprintf(stderr, __VA_ARGS__);                                \
+            abort();                                                     \
+        }                                                                \
+    } while (0)
 #include "latx-shbr.h"
 #include "sys-aot.h"
 #include "tcg/tcg-split-tb.h"
@@ -722,6 +743,23 @@ static void latxs_tb_link_align_inside_cacheline(TranslationBlock *tb)
 
 void latxs_tr_gen_exit_tb_j_tb_link(TranslationBlock *tb, int succ_id)
 {
+    TRANSLATION_DATA *td = lsenv->tr_data;
+    bool recovery_marker = td->eflag_tb_defer.valid && hamt_enabled() &&
+                           flag_reduction_tb_hamt_recover();
+    IR2_OPND recovery;
+
+    /* Keep the marker immediately before the slot.  Account for the extra
+     * instruction when aligning the two patchable words. */
+    if (recovery_marker) {
+        uintptr_t slot = (uintptr_t)tb->tc.ptr +
+                         ((td->ir2_asm_nr + 1) << 2);
+        if ((slot & (qemu_icache_linesize - 1)) ==
+            qemu_icache_linesize - 4) {
+            la_out_nop();
+        }
+        recovery = latxs_ir2_opnd_new_label();
+        latxs_append_ir2_opnd2(LISA_PCADDI, &la_ra, &recovery);
+    }
     /* 0. make sure two inst not cross cacheline */
     latxs_tb_link_align_inside_cacheline(tb);
 
@@ -740,6 +778,9 @@ void latxs_tr_gen_exit_tb_j_tb_link(TranslationBlock *tb, int succ_id)
     /* if nop was interrupt, and may just exec jirl without pcaddu18i  */
     latxs_append_ir2_opnda(LISA_B, 2);
     latxs_append_ir2_opnd0_(lisa_nop);
+    if (recovery_marker) {
+        latxs_append_ir2_opnd1(LISA_LABEL, &recovery);
+    }
 }
 
 void latxs_tr_gen_exit_tb_j_context_switch(IR2_OPND *tbptr,
@@ -1062,6 +1103,263 @@ static inline uint64_t latxs_tr_exit_tb_succ_pc(IR1_INST *branch, int succ_id)
         return ir1_target_addr(branch);
     }
     return ir1_addr_next(branch);
+}
+
+/*
+ * option sysflagtb -- TB-mode cross-TB dead-flag elimination.
+ *
+ * The fused compare+branch translators emit their M-EFLAGS producer
+ * (x86sub/x86add/x86and/x86or/x86dec) right before the native branch, which
+ * means every execution pays one serialised LBT flag write although neither
+ * successor reads the incoming flags.  When the guest instruction streams at
+ * BOTH successor PCs redefine all six OSZAPC flags before reading any flag
+ * (tb_disasm_eflag_use_zero(), a property of the guest bytes and therefore
+ * stable across TB retranslation), the producer is deferred to the exit slow
+ * paths of the two edges:
+ *
+ *   - a taken direct link skips it entirely (no EFLAGS observer),
+ *   - link miss / IRQ-check / context-switch exits execute it in
+ *     latxs_tr_tb_eflag_emit_deferred() below, before any C code runs.
+ *
+ * A direct link is only installed when the successor TB itself redefines all
+ * flags before reading any (tb_add_jump() veto), which is what makes this
+ * safe against TB splits / CF_COUNT_MASK / icount: if the successor turned
+ * out not to contain the redefinition, the fallback path materialises and the
+ * edge stays unlinked.
+ */
+bool latxs_tr_tb_eflag_defer_begin(IR1_INST *branch, int opcode,
+        IR2_OPND *opnd0, IR2_OPND *opnd1, int n_operands)
+{
+#ifdef CONFIG_LATX_SMC_INST_SELF_CHECK
+    /* The self-check executes a potentially faulting code-page read before
+     * the successor's first guest instruction. */
+    return false;
+#endif
+    TRANSLATION_DATA *td = lsenv->tr_data;
+    TranslationBlock *tb = td->curr_tb;
+
+    if (!flag_reduction_tb_defer() || !tb || !ir1_is_branch(branch)) {
+        return false;
+    }
+    if (td->is_tu_mode || in_aot_translate || option_sys_aot) {
+        return false;
+    }
+    /*
+     * The deferred producer is TB-final: both callers of
+     * latxs_tr_generate_exit_tb() below must be this branch's two edges, so
+     * the branch has to be the last instruction of the TB.  A fused
+     * translator that passes its producer instruction instead of the branch
+     * fails here (and would otherwise never defer).
+     */
+    SYSFLAGTB_CHECK(branch == td->ir1_inst_array + tb->icount - 1,
+              "sysflagtb: defer branch %p is not the TB-final IR1\n",
+              branch);
+    if (!td->can_link || td->eflag_tb_defer.valid) {
+        return false;
+    }
+    if ((tb->flags & HF_CPL_MASK) != HF_CPL_MASK) {
+        return false;
+    }
+    if (td->sys.tf || (td->sys.cflags & (CF_USE_ICOUNT | CF_NO_GOTO_TB |
+                                         CF_NO_GOTO_PTR | CF_SINGLE_STEP))) {
+        return false;
+    }
+    /* Only block-end checking observes an IRQ before the link slot, whose
+     * IRQ path materialises the deferred flags.  Block-start/no-opt may
+     * return to C at the successor entry, before its first instruction;
+     * async notification can also expose the stale flags. */
+    if (option_int_opt != IRQ_CHECK_BLOCK_END) {
+        return false;
+    }
+    if (tucp_fast_link_check()) {
+        return false;
+    }
+#ifdef CONFIG_SOFTMMU
+    /* The plain TBLINK_STUB_DIRECT path is required: cross-page and
+     * maybe-cross-page edges emit page/check stubs that may reach C before
+     * the direct-link slot, where a stale M-EFLAGS would be observable. */
+    if (branch_is_cross_page(branch, 0) || branch_is_cross_page(branch, 1) ||
+        branch_target_maybe_cross_page_tb(branch, 0) ||
+        branch_target_maybe_cross_page_tb(branch, 1)) {
+        return false;
+    }
+#else
+    return false;
+#endif
+#ifdef CONFIG_LATX_TU
+    {
+        /*
+         * lsenv->cpu_state holds the CPUX86State (see lsenv.h and
+         * latx-config.c: lsenv->cpu_state = env), not a CPUState.  Passing it
+         * straight to latxs_tb_disasm_eflag_use_zero() made the callee read
+         * CPUState.env_ptr at that address (offset 664, inside CPUX86State
+         * save_regs) and call get_page_addr_code_hostp_noexit() with a
+         * garbage/garbage-NULL env.  Use the established idiom (see
+         * cpu_hit_breakpoint() below) to obtain the real CPUState.
+         */
+        CPUState *cpu = env_cpu(lsenv->cpu_state);
+        target_ulong cs_base = tb->cs_base;
+        uint32_t flags = tb->flags;
+        uint32_t cflags = tb_cflags(tb);
+
+        if (!latxs_tb_disasm_eflag_use_zero(tb, cpu,
+                latxs_tr_exit_tb_succ_pc(branch, 0), cs_base, flags, cflags) ||
+            !latxs_tb_disasm_eflag_use_zero(tb, cpu,
+                latxs_tr_exit_tb_succ_pc(branch, 1), cs_base, flags, cflags)) {
+            return false;
+        }
+    }
+#else
+    return false;
+#endif
+    td->eflag_tb_defer.valid = 1;
+    td->eflag_tb_defer.emitted = 0;
+    td->eflag_tb_defer.n_operands = n_operands;
+    td->eflag_tb_defer.opcode = opcode;
+    td->eflag_tb_defer.opnd0 = *opnd0;
+    td->eflag_tb_defer.opnd1 = n_operands > 1 ? *opnd1 : latxs_zero_ir2_opnd;
+    return true;
+}
+
+void latxs_tr_tb_eflag_defer_end(void)
+{
+    TRANSLATION_DATA *td = lsenv->tr_data;
+    TranslationBlock *tb = td->curr_tb;
+
+    /* Both branch edges of a fused compare+branch must have emitted the
+     * slow-path materialisation; otherwise the TB would be missing it.  The
+     * skip bitmap is written by the same emit, so requiring 0x3 also proves
+     * that no edge was recorded as skipped without its materialisation. */
+    SYSFLAGTB_CHECK(!td->eflag_tb_defer.valid ||
+              (td->eflag_tb_defer.emitted == 2 &&
+               TB_EFLAGTB_SKIP(tb) == 0x3u),
+              "sysflagtb: deferred eflags emitted on %d/2 exits (skip=%#x)\n",
+              td->eflag_tb_defer.emitted, TB_EFLAGTB_SKIP(tb));
+    td->eflag_tb_defer.valid = 0;
+}
+
+typedef struct ExitTBEmitState {
+    bool emitted_interrupt_check;
+    int tblink_stub_mode;
+    bool loaded_tb_addr;
+    bool saved_next_eip;
+    /* The exit edge emitted its patchable direct-link slot (B 2; nop or the
+     * linkopt label) before the deferred materialisation. */
+    bool link_slot_emitted;
+#ifdef CONFIG_SOFTMMU
+    bool cp_inline_p0;
+    IR2_OPND cp_inline_fallback;
+    IR2_OPND cp_inline_link_entry;
+#ifdef CONFIG_LATX_TU
+    bool tu_generation_inline;
+    bool hras_checked_call;
+    IR2_OPND tu_generation_fallback;
+    IR2_OPND tu_generation_link_entry;
+    IR2_OPND hras_check_source;
+    unsigned hras_check_bits;
+#endif
+#endif
+    bool deferred_tu_cold_exit;
+} ExitTBEmitState;
+
+/*
+ * Option sysflagtb verification: the recorded producer operands must still be
+ * readable at the exit slow path.  Guest GPRs are mapped to fixed host
+ * registers that the exit scaffolding does not write, and RA only recycles
+ * itemps that were explicitly freed, so an itemp operand must still be
+ * allocated here.  A failure means the exit code (or a future translator
+ * change) clobbered the deferred operands and the materialisation would write
+ * garbage M-EFLAGS.
+ */
+static bool latxs_tr_tb_eflag_opnd_live(const IR2_OPND *opnd)
+{
+    if (!latxs_ir2_opnd_is_reg_temp((IR2_OPND *)opnd)) {
+        return true;
+    }
+    for (int i = 0; i < (int)latxs_itemp_status_num; ++i) {
+        if (latxs_itemp_status_default[i].physical_id ==
+            latxs_ir2_opnd_reg((IR2_OPND *)opnd)) {
+            return !latxs_ra_temp_is_free(i);
+        }
+    }
+    return true;
+}
+
+/*
+ * Opt-in slow-path counter (LATS_SYSFLAGTB_STAT=1): proves at runtime that
+ * the deferred materialisation really executes on C exits.  It is emitted
+ * only on the link-miss / pending-IRQ slow path, right before the producer,
+ * so a taken direct link never reaches it.  a0/a1 are ABI argument registers
+ * that no code on this path keeps live (the producer reads only guest GPRs /
+ * itemps, and the context-switch jump does not use them), and the same
+ * AMADD sequence is already used by latxs_external_tu_stub().
+ */
+static void latxs_tr_tb_eflag_emit_materialise_count(void)
+{
+    uint64_t *counter = latx_tb_eflag_stat_materialise_counter();
+
+    if (!counter) {
+        return;
+    }
+    la_imm(&la_a0, (uintptr_t)counter);
+    if (hamt_enabled()) {
+        latxs_tr_dmw_in_fix_mem(&la_a0);
+    }
+    la_out2i(LISA_ADDI_D, &la_a1, &la_zero, 1);
+    la_out3(LISA_AMADD_D, &la_zero, &la_a0, &la_a1);
+}
+
+/* Emit the deferred flag producer on this exit edge's slow path.  The caller
+ * guarantees that the direct-link slot has already been emitted (so a taken
+ * link branches over this code) and that the interrupt-check label, if any,
+ * points here (so a pending IRQ executes this before leaving to C). */
+static void latxs_tr_tb_eflag_emit_deferred(TranslationBlock *tb, int succ_id,
+        const ExitTBEmitState *state)
+{
+    TRANSLATION_DATA *td = lsenv->tr_data;
+
+    if (!td->eflag_tb_defer.valid) {
+        return;
+    }
+    /*
+     * Coverage invariants of the deferred slow path.  They fire if a future
+     * change selects a stub that can reach C before this point (cross-page
+     * check / TU check / deferred TU cold exit), or if the link-slot
+     * bookkeeping is broken, or if the two edges are not emitted in order.
+     */
+    SYSFLAGTB_CHECK(TBLINK_STUB_MODE(state->tblink_stub_mode) == TBLINK_STUB_DIRECT ||
+              TBLINK_STUB_MODE(state->tblink_stub_mode) == TBLINK_STUB_NONE,
+              "sysflagtb: deferred edge %d uses link stub mode %#x\n",
+              succ_id, state->tblink_stub_mode);
+    SYSFLAGTB_CHECK(!state->deferred_tu_cold_exit,
+              "sysflagtb: deferred edge %d uses a TU cold exit\n", succ_id);
+    if (TBLINK_STUB_MODE(state->tblink_stub_mode) == TBLINK_STUB_DIRECT) {
+        SYSFLAGTB_CHECK(state->link_slot_emitted,
+                  "sysflagtb: deferred edge %d emitted before its link slot\n",
+                  succ_id);
+    }
+    SYSFLAGTB_CHECK(succ_id == td->eflag_tb_defer.emitted,
+              "sysflagtb: deferred edge %d emitted out of order (next %d)\n",
+              succ_id, td->eflag_tb_defer.emitted);
+    SYSFLAGTB_CHECK(latxs_tr_tb_eflag_opnd_live(&td->eflag_tb_defer.opnd0) &&
+              (td->eflag_tb_defer.n_operands < 2 ||
+               latxs_tr_tb_eflag_opnd_live(&td->eflag_tb_defer.opnd1)),
+              "sysflagtb: deferred producer operand no longer live\n");
+    latxs_tr_tb_eflag_emit_materialise_count();
+    if (td->eflag_tb_defer.n_operands > 1) {
+        la_out2((IR2_OPCODE)td->eflag_tb_defer.opcode,
+                &td->eflag_tb_defer.opnd0, &td->eflag_tb_defer.opnd1);
+    } else {
+        la_out1((IR2_OPCODE)td->eflag_tb_defer.opcode,
+                &td->eflag_tb_defer.opnd0);
+    }
+    if (hamt_enabled() && flag_reduction_tb_hamt_recover()) {
+        /* The marker must not survive the materialisation fallback. */
+        la_out2i(LISA_ADDI_D, &la_ra, &la_zero, 0);
+    }
+    TB_EFLAGTB_SKIP(tb) |= 1u << succ_id;
+    latx_tb_eflag_stat_defer(td->eflag_tb_defer.emitted);
+    td->eflag_tb_defer.emitted++;
 }
 
 static inline void __latxs_tr_gen_to_cp_check_page1_id0(IR1_INST *branch,
@@ -1400,26 +1698,6 @@ typedef struct ExitTBContext {
     bool cross_page_intcheck;
 } ExitTBContext;
 
-typedef struct ExitTBEmitState {
-    bool emitted_interrupt_check;
-    int tblink_stub_mode;
-    bool loaded_tb_addr;
-    bool saved_next_eip;
-#ifdef CONFIG_SOFTMMU
-    bool cp_inline_p0;
-    IR2_OPND cp_inline_fallback;
-    IR2_OPND cp_inline_link_entry;
-#ifdef CONFIG_LATX_TU
-    bool tu_generation_inline;
-    bool hras_checked_call;
-    IR2_OPND tu_generation_fallback;
-    IR2_OPND tu_generation_link_entry;
-    IR2_OPND hras_check_source;
-    unsigned hras_check_bits;
-#endif
-#endif
-    bool deferred_tu_cold_exit;
-} ExitTBEmitState;
 
 #ifdef CONFIG_LATX_TU
 typedef struct HrasDirectCall {
@@ -2266,7 +2544,9 @@ static void latxs_tr_exit_tb_emit_link_stub(const ExitTBContext *ctx,
             break;
         }
 #endif
-        if (option_link_opt && !state->emitted_interrupt_check) {
+        if (option_link_opt && !state->emitted_interrupt_check &&
+            !(ctx->tr_ctx->eflag_tb_defer.valid && hamt_enabled() &&
+              flag_reduction_tb_hamt_recover())) {
             IR2_OPND label = la_new_label();
 
             latxs_tb_link_align_inside_cacheline(ctx->curr_tb);
@@ -2276,6 +2556,7 @@ static void latxs_tr_exit_tb_emit_link_stub(const ExitTBContext *ctx,
         } else {
             latxs_tr_gen_exit_tb_j_tb_link(ctx->curr_tb, succ_id);
         }
+        state->link_slot_emitted = true;
         break;
 #ifdef CONFIG_SOFTMMU
     case TBLINK_STUB_CPCHECK:
@@ -2888,6 +3169,15 @@ static void latxs_tr_exit_tb_prepare(ExitTBContext *ctx,
         !state->deferred_tu_cold_exit) {
         latxs_ir2_interrupt_set_label(ctx->curr_tb, succ_id);
     }
+
+    /*
+     * sysflagtb: the direct-link slot was emitted above, and the interrupt
+     * label (if any) now points at the current position, so both the
+     * link-miss fall-through and the pending-IRQ branch reach this
+     * materialisation before the context switch / any C observer.  A taken
+     * direct link branches over it.
+     */
+    latxs_tr_tb_eflag_emit_deferred(ctx->curr_tb, succ_id, state);
 }
 
 static void latxs_tr_exit_tb_finish(const ExitTBContext *ctx,

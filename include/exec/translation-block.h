@@ -411,6 +411,27 @@ struct TranslationBlock {
 #define PTN_EFLAG_TYPE_X86MTFLAG 3
 #define PTN_EFLAG_TYPE_X86OR    5
 #define PTN_EFLAG_TYPE_X86SRL   6
+/*
+ * option sysflagtb (TB-mode cross-TB dead-flag elimination) keeps its per-TB
+ * state in the ptn payload while ptn.eflag_type stays
+ * PTN_EFLAG_TYPE_INVALID.  The HAMT deferred-recovery path keys on
+ * eflag_type and therefore never interprets these bits, and the option is
+ * only honoured in ordinary TB mode with no TU/AOT runtime (enforced in
+ * latxs_options_check_sysflagtb()), where nothing else writes the payload.
+ * The fields live here so TranslationBlock keeps its pinned 352-byte size.
+ *
+ *   ptn.pcoffset: bits 0..5 = 0 only for a verified safe entry; 0x3f
+ *                 conservatively rejects deferred-flag links;
+ *                 bit 15 = 1 once the translation-time scan has run.
+ *   ptn.os:       bit n = this TB's exit edge n skips its TB-final M-EFLAGS
+ *                 materialisation on the direct-link fast path.
+ */
+#define PTN_EFLAGTB_USE_MASK    0x003f
+#define PTN_EFLAGTB_VALID_BIT   0x8000
+#define TB_EFLAGTB_SKIP(tb)     ((tb)->ptn.os)
+#define TB_EFLAGTB_USE(tb)      ((tb)->ptn.pcoffset & PTN_EFLAGTB_USE_MASK)
+#define TB_EFLAGTB_USE_VALID(tb) \
+    (((tb)->ptn.pcoffset & PTN_EFLAGTB_VALID_BIT) != 0)
     uint64_t page_addr_mix;
 #define tb_mix_page_addr_n(val, i, n)  \
     ( (((uint64_t)(val))>>(i)) & ((0x1ULL<<(n))-1) )

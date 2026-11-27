@@ -204,7 +204,11 @@ bool translate_cmp_jcc(IR1_INST *pir1)
         } else {
             LATXS_FLAG_REDUCTION_CHECKIF(pir1) {
                 int os = ir1_opnd_size(opnd0); /* 8, 16, 32, 64 */
-                latxs_append_ir2_opnd2(LISA_X86SUB_B + (os >> 4) - (os >> 6), &src0, &src1);
+                IR2_OPCODE eflag_op = LISA_X86SUB_B + (os >> 4) - (os >> 6);
+                if (!latxs_tr_tb_eflag_defer_begin(nir1, eflag_op,
+                                                   &src0, &src1, 2)) {
+                    latxs_append_ir2_opnd2(eflag_op, &src0, &src1);
+                }
             }
         }
     }
@@ -240,6 +244,7 @@ bool translate_cmp_jcc(IR1_INST *pir1)
 
     /* taken */
     latxs_tr_generate_exit_tb(nir1, 1);
+    latxs_tr_tb_eflag_defer_end();
 
     return true;
 
@@ -1060,8 +1065,14 @@ bool translate_test_jcc(IR1_INST *pir1)
                 tu_data->eflag_opt_data.ef_opnd1 = src0;
 #endif
             } else {
-                LATXS_FLAG_REDUCTION_CHECKIF(pir1)
-                latxs_append_ir2_opnd2(LISA_X86AND_B + (os >> 4) - (os >> 6), &src0, &src0);
+                LATXS_FLAG_REDUCTION_CHECKIF(pir1) {
+                    IR2_OPCODE eflag_op =
+                        LISA_X86AND_B + (os >> 4) - (os >> 6);
+                    if (!latxs_tr_tb_eflag_defer_begin(nir1, eflag_op,
+                                                       &src0, &src0, 2)) {
+                        latxs_append_ir2_opnd2(eflag_op, &src0, &src0);
+                    }
+                }
             }
         }
     } else {
@@ -1080,8 +1091,14 @@ bool translate_test_jcc(IR1_INST *pir1)
                 tu_data->eflag_opt_data.ef_opnd1 = src1;
 #endif
             } else {
-                LATXS_FLAG_REDUCTION_CHECKIF(pir1)
-                latxs_append_ir2_opnd2(LISA_X86AND_B + (os >> 4) - (os >> 6), &src0, &src1);
+                LATXS_FLAG_REDUCTION_CHECKIF(pir1) {
+                    IR2_OPCODE eflag_op =
+                        LISA_X86AND_B + (os >> 4) - (os >> 6);
+                    if (!latxs_tr_tb_eflag_defer_begin(nir1, eflag_op,
+                                                       &src0, &src1, 2)) {
+                        latxs_append_ir2_opnd2(eflag_op, &src0, &src1);
+                    }
+                }
             }
         }
         temp = latxs_ra_alloc_itemp();
@@ -1218,6 +1235,7 @@ bool translate_test_jcc(IR1_INST *pir1)
 
     /* taken */
     latxs_tr_generate_exit_tb(nir1, 1);
+    latxs_tr_tb_eflag_defer_end();
 
     return true;
 
@@ -1343,9 +1361,14 @@ bool translate_and_jcc(IR1_INST *pir1)
             tu_data->eflag_opt_data.ef_opnd1 = cond_z;
 #endif
         } else {
-            LATXS_FLAG_REDUCTION_CHECKIF(pir1)
-            latxs_append_ir2_opnd2(LISA_X86AND_B + (os >> 4) - (os >> 6),
-                                   &cond_z, &cond_z);
+            LATXS_FLAG_REDUCTION_CHECKIF(pir1) {
+                IR2_OPCODE eflag_op =
+                    LISA_X86AND_B + (os >> 4) - (os >> 6);
+                if (!latxs_tr_tb_eflag_defer_begin(nir1, eflag_op,
+                                                   &cond_z, &cond_z, 2)) {
+                    latxs_append_ir2_opnd2(eflag_op, &cond_z, &cond_z);
+                }
+            }
         }
     }
 
@@ -1425,6 +1448,7 @@ bool translate_and_jcc(IR1_INST *pir1)
 
     /* taken */
     latxs_tr_generate_exit_tb(nir1, 1);
+    latxs_tr_tb_eflag_defer_end();
 
     return true;
 }
@@ -1728,9 +1752,14 @@ bool translate_or_jcc(IR1_INST *pir1)
             tu_data->eflag_opt_data.ef_opnd1 = cond_z;
 #endif
         } else {
-            LATXS_FLAG_REDUCTION_CHECKIF(pir1)
-            latxs_append_ir2_opnd2(LISA_X86OR_B + (os >> 4) - (os >> 6),
-                                   &cond_z, &cond_z);
+            LATXS_FLAG_REDUCTION_CHECKIF(pir1) {
+                IR2_OPCODE eflag_op =
+                    LISA_X86OR_B + (os >> 4) - (os >> 6);
+                if (!latxs_tr_tb_eflag_defer_begin(nir1, eflag_op,
+                                                   &cond_z, &cond_z, 2)) {
+                    latxs_append_ir2_opnd2(eflag_op, &cond_z, &cond_z);
+                }
+            }
         }
     }
 
@@ -1810,6 +1839,7 @@ bool translate_or_jcc(IR1_INST *pir1)
 
     /* taken */
     latxs_tr_generate_exit_tb(nir1, 1);
+    latxs_tr_tb_eflag_defer_end();
 
     return true;
 }
@@ -2206,9 +2236,14 @@ static bool translate_xor_jcc(IR1_INST *pir1)
             tu_data->eflag_opt_data.ef_opnd1 = cond_z;
 #endif
         } else {
-            LATXS_FLAG_REDUCTION_CHECKIF(pir1)
-            latxs_append_ir2_opnd2(LISA_X86OR_B + (os >> 4) - (os >> 6),
-                                   &cond_z, &cond_z);
+            LATXS_FLAG_REDUCTION_CHECKIF(pir1) {
+                IR2_OPCODE eflag_op =
+                    LISA_X86OR_B + (os >> 4) - (os >> 6);
+                if (!latxs_tr_tb_eflag_defer_begin(nir1, eflag_op,
+                                                   &cond_z, &cond_z, 2)) {
+                    latxs_append_ir2_opnd2(eflag_op, &cond_z, &cond_z);
+                }
+            }
         }
     }
 
@@ -2288,6 +2323,7 @@ static bool translate_xor_jcc(IR1_INST *pir1)
 
     /* taken */
     latxs_tr_generate_exit_tb(nir1, 1);
+    latxs_tr_tb_eflag_defer_end();
 
     return true;
 }
@@ -4192,8 +4228,11 @@ bool translate_dec_jcc(IR1_INST *pir1)
 
     if (tu_next_eflag_use) {
         LATXS_FLAG_REDUCTION_CHECKIF(pir1) {
-            latxs_append_ir2_opnd1(LISA_X86DEC_B + (os >> 4) -
-                                   (os >> 6), &src);
+            IR2_OPCODE eflag_op = LISA_X86DEC_B + (os >> 4) - (os >> 6);
+            if (!latxs_tr_tb_eflag_defer_begin(jcc, eflag_op, &src, &src,
+                                               1)) {
+                latxs_append_ir2_opnd1(eflag_op, &src);
+            }
         }
     }
 
@@ -4232,6 +4271,7 @@ bool translate_dec_jcc(IR1_INST *pir1)
 
     /* taken */
     latxs_tr_generate_exit_tb(jcc, 1);
+    latxs_tr_tb_eflag_defer_end();
 
     return true;
 }
@@ -4280,12 +4320,15 @@ bool translate_add_jcc(IR1_INST *pir1)
     if (is_same_reg) {
         if (ir1_opnd_is_gpr(opnd0) && (ir1_opnd_size(opnd0) == 64)) {
             if (tu_next_eflag_use == 1) {
+                /* src0 is overwritten by the ADD below; the producer operands
+                 * are not available at TB exit, so this path stays eager. */
                 LATXS_FLAG_REDUCTION_CHECKIF(pir1)
                 latxs_append_ir2_opnd2(LISA_X86ADD_D, &src0, &src0);
             }
             latxs_append_ir2_opnd3(LISA_ADD_D, &src0, &src0, &src0);
         } else {
             if (tu_next_eflag_use == 1) {
+                /* src0 is overwritten by the ADD below: keep it eager. */
                 LATXS_FLAG_REDUCTION_CHECKIF(pir1)
                 latxs_append_ir2_opnd2(LISA_X86ADD_B + (os >> 4), &src0, &src0);
             }
@@ -4300,8 +4343,13 @@ bool translate_add_jcc(IR1_INST *pir1)
             latxs_load_ir1_to_ir2(&src1, opnd1, EXMode_S);
         }
         if (tu_next_eflag_use == 1) {
-            LATXS_FLAG_REDUCTION_CHECKIF(pir1)
-            latxs_append_ir2_opnd2(LISA_X86ADD_B + (os >> 4) - (os >> 6), &src0, &src1);
+            LATXS_FLAG_REDUCTION_CHECKIF(pir1) {
+                IR2_OPCODE eflag_op = LISA_X86ADD_B + (os >> 4) - (os >> 6);
+                if (!latxs_tr_tb_eflag_defer_begin(nir1, eflag_op,
+                                                   &src0, &src1, 2)) {
+                    latxs_append_ir2_opnd2(eflag_op, &src0, &src1);
+                }
+            }
         }
         temp = latxs_ra_alloc_itemp();
         latxs_append_ir2_opnd3(LISA_ADD_D, &temp, &src0, &src1);
@@ -4371,6 +4419,7 @@ bool translate_add_jcc(IR1_INST *pir1)
 
     /* taken */
     latxs_tr_generate_exit_tb(nir1, 1);
+    latxs_tr_tb_eflag_defer_end();
 
     return true;
 }
@@ -4419,12 +4468,14 @@ bool translate_sub_jcc(IR1_INST *pir1)
     if (is_same_reg) {
         if (ir1_opnd_is_gpr(opnd0) && (ir1_opnd_size(opnd0) == 64)) {
             if (tu_next_eflag_use == 1) {
+                /* src0 is overwritten by the SUB below: keep it eager. */
                 LATXS_FLAG_REDUCTION_CHECKIF(pir1)
                 latxs_append_ir2_opnd2(LISA_X86SUB_D, &src0, &src0);
             }
             latxs_append_ir2_opnd3(LISA_SUB_D, &src0, &src0, &src0);
         } else {
             if (tu_next_eflag_use == 1) {
+                /* src0 is overwritten by the SUB below: keep it eager. */
                 LATXS_FLAG_REDUCTION_CHECKIF(pir1)
                 latxs_append_ir2_opnd2(LISA_X86SUB_B + (os >> 4), &src0, &src0);
             }
@@ -4439,8 +4490,13 @@ bool translate_sub_jcc(IR1_INST *pir1)
             latxs_load_ir1_to_ir2(&src1, opnd1, EXMode_S);
         }
         if (tu_next_eflag_use == 1) {
-            LATXS_FLAG_REDUCTION_CHECKIF(pir1)
-            latxs_append_ir2_opnd2(LISA_X86SUB_B + (os >> 4) - (os >> 6), &src0, &src1);
+            LATXS_FLAG_REDUCTION_CHECKIF(pir1) {
+                IR2_OPCODE eflag_op = LISA_X86SUB_B + (os >> 4) - (os >> 6);
+                if (!latxs_tr_tb_eflag_defer_begin(nir1, eflag_op,
+                                                   &src0, &src1, 2)) {
+                    latxs_append_ir2_opnd2(eflag_op, &src0, &src1);
+                }
+            }
         }
         temp = latxs_ra_alloc_itemp();
         latxs_append_ir2_opnd3(LISA_SUB_D, &temp, &src0, &src1);
@@ -4507,6 +4563,7 @@ bool translate_sub_jcc(IR1_INST *pir1)
 
     /* taken */
     latxs_tr_generate_exit_tb(nir1, 1);
+    latxs_tr_tb_eflag_defer_end();
 
     return true;
 }

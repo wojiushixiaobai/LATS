@@ -128,6 +128,8 @@ int option_ir1_hash;
 
 int option_sys_flag_reduction;
 int option_sys_flag_reduction_tu;
+/* TB-mode cross-TB dead-flag elimination (fused compare+branch). */
+int option_sys_flag_reduction_tb;
 uint64_t option_instptn;
 int option_risk_mem_offset;
 int option_risk_simd_ignore_upper64;
@@ -861,6 +863,10 @@ QemuOptsList qemu_latx_opts = {
             .type = QEMU_OPT_NUMBER,
             .help = "optimization for eflags in tu",
         }, {
+            .name = "sysflagtb",
+            .type = QEMU_OPT_NUMBER,
+            .help = "cross-tb eflags optimization in tb mode",
+        }, {
             .name = "instptn",
             .type = QEMU_OPT_NUMBER,
             .help = "instruction pattern",
@@ -1145,6 +1151,90 @@ static void latxs_options_check_fpe(void)
     }
 }
 
+/*
+ * option sysflagtb stores its per-TB state in the inert ptn payload (see
+ * TranslationBlock), which is only inert for ordinary TB-mode translation.
+ * Any TU/AOT runtime writes that payload for deferred-flag recovery, so the
+ * option is rejected there instead of risking a collision.
+ */
+static void latxs_options_check_sysflagtb(void)
+{
+#ifdef CONFIG_SOFTMMU
+    if (flag_reduction_tb_defer() && hamt_enabled() &&
+        !flag_reduction_tb_hamt_recover()) {
+        /*
+         * HAMT may poison a successor entry while a vCPU is already taking a
+         * direct link.  The invalid-entry handler has no predecessor operands
+         * of its own; without the recovery protocol it cannot reconstruct the
+         * deferred flags producer, and unlinking is not sufficient for an
+         * already in-flight branch.  Production default (sysflagtb=1,
+         * HAMT on) therefore stays fail-closed.
+         */
+        warn_report("sysflagtb cannot recover deferred flags on HAMT TB "
+                    "invalidation without sysflagtb=3; disabling sysflagtb");
+        option_sys_flag_reduction_tb &= ~FLAGRDTN_TB_DEFER;
+    }
+    if (flag_reduction_tb_defer() && hamt_enabled() &&
+        flag_reduction_tb_hamt_recover()) {
+        /*
+         * Validation-only HAMT recovery protocol.  It needs three
+         * preconditions that are cheaper to enforce here than to prove for
+         * every generated path:
+         *
+         *  - tuhras=0: TU return-address linking adds further direct entry
+         *    points that the entry-clear invariant does not cover.
+         *  - rastoptp=0: the top-priority software-RAS patches jumps whose
+         *    targets are TB entries; entry 0 now begins with the $ra clear,
+         *    but keeping the direct-call variants out of the validation
+         *    build makes the tested control flow a single, reviewable shape.
+         *  - block-end IRQ checking: latxs_tr_tb_eflag_defer_begin() already
+         *    requires it; enforcing it here keeps the option dump honest.
+         */
+        if (option_tu_hras) {
+            warn_report("sysflagtb HAMT recovery requires tuhras=0; "
+                        "disabling sysflagtb");
+            option_sys_flag_reduction_tb &= ~FLAGRDTN_TB_DEFER;
+        }
+        if (option_rastoptp) {
+            warn_report("sysflagtb HAMT recovery requires rastoptp=off; "
+                        "disabling rastoptp for the validation build");
+            option_rastoptp = 0;
+        }
+        if (option_int_opt != IRQ_CHECK_BLOCK_END) {
+            warn_report("sysflagtb HAMT recovery requires intopt=2 "
+                        "(block-end IRQ checks); disabling sysflagtb");
+            option_sys_flag_reduction_tb &= ~FLAGRDTN_TB_DEFER;
+        }
+        if (flag_reduction_tb_defer()) {
+            warn_report("sysflagtb HAMT deferred-flag recovery is an "
+                        "experimental validation feature (sysflagtb=3); "
+                        "do not ship this configuration");
+        }
+    }
+#else
+    if (flag_reduction_tb_hamt_recover()) {
+        warn_report("sysflagtb=3 HAMT recovery requires system mode");
+        option_sys_flag_reduction_tb &= ~FLAGRDTN_TB_HAMT_RECOVER;
+    }
+#endif
+    if (flag_reduction_tb_defer() && hamt_enabled() && option_tu_hras) {
+        warn_report("sysflagtb recovery requires tuhras=0; disabling sysflagtb");
+        option_sys_flag_reduction_tb &= ~FLAGRDTN_TB_DEFER;
+    }
+    if (flag_reduction_tb_defer() &&
+        (tu_runtime_enabled() || option_sys_aot || option_aot_save ||
+         option_aot_load || option_aot_fork)) {
+        warn_report("sysflagtb requires ordinary TB mode (tumode=off, "
+                    "aotsys=off); disabling sysflagtb");
+        option_sys_flag_reduction_tb = 0;
+    }
+    if (!flag_reduction_tb_defer() || !hamt_enabled()) {
+        /* No skip edge and no HAMT invalid-entry path: the recovery
+         * marker/entry-clear must not be emitted or reported as active. */
+        option_sys_flag_reduction_tb &= ~FLAGRDTN_TB_HAMT_RECOVER;
+    }
+}
+
 static void latxs_options_check_sysflagtu(void)
 {
     if (tu_runtime_enabled() && (!option_hamt || !hamt_do_cpl(3)) &&
@@ -1321,6 +1411,7 @@ static void latx_sys_check_options(void)
     }
     latxs_options_check_fpe();
     latxs_options_check_sysflagtu();
+    latxs_options_check_sysflagtb();
     latxs_options_check_smmupcaddi();
 
     if (option_aot_gpr_highbits && !aot_tu_enabled()) {
@@ -1727,6 +1818,7 @@ void latx_parse_options(QemuOpts *opts)
     parse_options_bool("sleb", option_split_search);
     parse_options_uint("sysflag", option_sys_flag_reduction);
     parse_options_uint("sysflagtu", option_sys_flag_reduction_tu);
+    parse_options_uint("sysflagtb", option_sys_flag_reduction_tb);
     parse_options_uint("instptn", option_instptn);
     parse_options_bool("pushpop", option_pushpop);
     parse_options_bool("pushpopret", option_pushpop_ret);
@@ -1993,6 +2085,7 @@ void dump_latxs_options(void)
     latx_options_printf("[LATX-SYS] -----------------------------------------------------\n");
     latx_options_printf("[LATX-SYS] flag reduction : inside tb = %d\n", option_sys_flag_reduction);
     latx_options_printf("[LATX-SYS] flag reduction : cross tb in tu = %x\n", option_sys_flag_reduction_tu);
+    latx_options_printf("[LATX-SYS] flag reduction : cross tb in tb mode = %x\n", option_sys_flag_reduction_tb);
     latx_options_printf("[LATX-SYS] -----------------------------------------------------\n");
     latx_options_printf("[LATX-SYS] push pop  = %d\n", option_pushpop);
     latx_options_printf("[LATX-SYS] instruction pattern = %" PRIu64 "\n",
@@ -2381,6 +2474,8 @@ void latxs_options_init(void)
     option_fast_fpr_ldst = 1; // ffldst
     option_sys_flag_reduction = 1; // sysflag
     option_sys_flag_reduction_tu = FLAGRDTN_TU_DEFAULT; // sysflagtu
+    /* Conservative default: TB-mode cross-TB dead-flag elimination is off. */
+    option_sys_flag_reduction_tb = 0; // sysflagtb
     option_instptn = 0x3ffffffffULL; /* instptn */
     option_pushpop = 1; // pushpop
     option_pushpop_ret = 1;

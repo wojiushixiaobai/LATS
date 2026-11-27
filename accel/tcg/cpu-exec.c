@@ -2035,6 +2035,17 @@ static void tb_add_jump(TranslationBlock *tb, int n,
 {
     uintptr_t old;
 
+    /*
+     * option sysflagtb: this edge skipped its TB-final M-EFLAGS
+     * materialisation, so it may only be linked to a successor that
+     * redefines all flags before reading any.  Otherwise the fallback stays
+     * in place (it materialises the flags before leaving to C).  The test is
+     * a no-op while the option is off: eflag_tb_skip is then always zero.
+     */
+    if (!latx_tb_eflag_link_allowed(tb, n, tb_next)) {
+        return;
+    }
+
     if (check_misc_flags(tb, MF_END_SYSCALL)) {
         if (option_opt_syscall == 1) {
             current_cpu->env_ptr->syscall_tb = (void *)tb_next->tc.ptr;
@@ -2119,6 +2130,11 @@ static void tb_add_jump(TranslationBlock *tb, int n,
     /* add in TB jmp list */
     tb->jmp_list_next[n] = tb_next->jmp_list_head;
     tb_next->jmp_list_head = (uintptr_t)tb | n;
+
+    /* option sysflagtb verification: re-check that a skip edge was linked to
+     * a successor that publishes "redefines all flags before reading any".
+     * No-op unless the option is on; see latx_tb_eflag_link_allowed(). */
+    latx_tb_eflag_stat_link(tb, n, tb_next);
 
     qemu_spin_unlock(&tb_next->jmp_lock);
 

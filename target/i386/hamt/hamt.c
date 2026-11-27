@@ -52,6 +52,8 @@
 
 #include "latx-native-asm.h"
 #include "latx-options.h"
+#include "latx-config.h"
+#include "latx-sysflagtb-recovery.h"
 #include "latx-ras.h"
 #include "latx-misc.h"
 #include "lsenv.h"
@@ -934,6 +936,69 @@ void hamt_ine_handler(uint64_t estat, CPUX86State *env, uint32_t *epc)
         !(tb_cflags(tb) & CF_INVALID)) {
         hamt_err_handler(estat, env, epc);
         g_assert_not_reached();
+    }
+    /*
+     * option sysflagtb + HAMT recovery (sysflagtb=3, validation only).
+     *
+     * The target entry is poisoned, so the vCPU was already in flight on a
+     * direct link into it and the source TB's final M-EFLAGS producer was
+     * deferred.  Returning to the original producer before the normal lookup
+     * can expose stale flags is the whole point of the protocol:
+     *
+     *  - every TB starts with "addi.d $ra,$zero,0", so $ra can only hold a
+     *    marker between the deferred edge's pcaddi and the linked successor
+     *    entry.  A poisoned successor entry is the only point where that
+     *    clear does not execute; every other entry, the link-miss fallback
+     *    and the pending-IRQ path clear $ra before any observer can run.
+     *  - the marker is the materialisation address (= slot + 8); the words
+     *    before it and the TB's skip bits are immutable after publication.
+     *  - source code and metadata survive until an exclusive tb_flush, which
+     *    cannot run while this vCPU is inside the handler.
+     *
+     * The check deliberately ignores the live link slot and jmp_dest: they
+     * can be reset concurrently by tb_jmp_unlink() after the jump executed.
+     */
+    if (flag_reduction_tb_defer() && flag_reduction_tb_hamt_recover() &&
+        TB_EFLAGTB_USE_VALID(tb) && TB_EFLAGTB_USE(tb) == 0) {
+        uintptr_t marker = DMW_OUT(frame[1]);
+        TranslationBlock *source = marker >= 4 ? tcg_tb_lookup(marker - 4) : NULL;
+        int edge = source ? latx_sysflagtb_recovery_edge(source, marker) : -1;
+
+        if (edge >= 0) {
+            qatomic_fetch_add(&latx_tb_eflag_stats[LATX_TB_EFLAG_STAT_RECOVERED], 1);
+            env->hamt_invalid_tb_entries++;
+            frame[PT_ERA_INDEX] = hamt_mode_dmw() ? DMW_IN(marker) : marker;
+#ifdef CONFIG_LATX_OPT_NOFP
+            if (physical_fpr_live) hamt_restore_physical_fpr(env);
+            env->nofp = nofp;
+            __nofp_sync_xmm_from_env(cpu);
+#endif
+            hamt_restore_to_native_frame(env, frame);
+            __write_native_fcsr0(fcsr);
+            return;
+        }
+        /*
+         * A marker word that the structural check rejects is a protocol bug:
+         * the only emitter of that word is the deferred edge itself.  Fail
+         * fast instead of falling through to the normal lookup with stale
+         * deferred flags (which would silently corrupt guest EFLAGS).
+         */
+        if (source && !(marker & 3) &&
+            marker >= (uintptr_t)source->tc.ptr + 4 &&
+            marker - (uintptr_t)source->tc.ptr <=
+                (uintptr_t)source->ir2_num * 4 &&
+            qatomic_read((uint32_t *)(marker - 4)) ==
+                LATX_SYSFLAGTB_MARKER_INSN) {
+            fprintf(stderr, "[LATX-SYS] sysflagtb recovery marker mismatch: "
+                    "tb %p pc=%#llx marker=%p source %p pc=%#llx\n",
+                    tb, (unsigned long long)tb->pc, (void *)marker, source,
+                    (unsigned long long)source->pc);
+            abort();
+        }
+        if (marker) {
+            qatomic_fetch_add(&latx_tb_eflag_stats[
+                    LATX_TB_EFLAG_STAT_RECOVER_REJECT], 1);
+        }
     }
     /* As in the fast page-fault path, resume through the TB lookup stub.
      * This is before the target's first guest instruction: no RSP replay. */

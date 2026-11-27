@@ -18,6 +18,7 @@
 #include "latx-static-codes.h"
 #include "latx-tb-trace-sys.h"
 #include "latx-sys-inst-ptn.h"
+#include "latx-sysflagtb-recovery.h"
 #include "latx-native-asm.h"
 #include "latx-cp-counter.h"
 #include "latx-ras.h"
@@ -39,6 +40,7 @@ uint64_t cp_check_hit[2];
 #include "hamt-dmw.h"
 
 #include "sysemu/rr.h"
+#include "sysemu/sysemu.h"
 
 #include "latxs-imm-cache.h"
 
@@ -228,6 +230,8 @@ target_ulong get_eip_cpu_state(TranslationBlock *tb)
         return tb->pc;
     }
 }
+static void latx_tb_eflag_stat_init(void);
+
 int target_latxs_host(CPUState *cpu, TranslationBlock *tb,
         int max_insns, void *code_highwater, int *search_size,
         void *host_pc)
@@ -249,6 +253,9 @@ int target_latxs_host(CPUState *cpu, TranslationBlock *tb,
     option_config_dump(tb->flags & 0x3);
 
     TRANSLATION_DATA *td = lsenv->tr_data;
+    if (flag_reduction_tb_defer()) {
+        latx_tb_eflag_stat_init();
+    }
     latxs_tr_sys_init(tb, max_insns, code_highwater, host_pc);
     td->is_tu_mode = 0;
 
@@ -263,7 +270,170 @@ int target_latxs_host(CPUState *cpu, TranslationBlock *tb,
     /* perform flag reduction OR just set flag */
     latxs_flag_reduction(tb);
 
-    return latxs_tr_translate_tb(tb, search_size);
+    int ret = latxs_tr_translate_tb(tb, search_size);
+
+    /*
+     * option sysflagtb: publish this TB's incoming-flag usedef answer.  A
+     * predecessor that skipped its TB-final M-EFLAGS materialisation may only
+     * be linked to a successor with eflag_use == 0 (see
+     * latx_tb_eflag_link_allowed()), which is what makes the skip independent
+     * of TB splits, CF_COUNT_MASK/icount and successor retranslation.
+     */
+    if (ret > 0 && !td->is_tu_mode && flag_reduction_tb_defer()) {
+        __latxs_flag_reduction_tb_mode_parse_tb_use(tb);
+    }
+
+    /*
+     * option sysflagtb + HAMT recovery: verify the generated recovery layout
+     * before the TB is published.  The runtime handler trusts the marker
+     * word and the TB metadata structurally; a layout mismatch would make an
+     * in-flight deferred jump resume with stale flags, which is exactly the
+     * failure mode this option must not introduce.  Fail fast instead
+     * (verification-only configuration; a stock run never reaches this).
+     */
+    if (ret > 0 && !td->is_tu_mode && flag_reduction_tb_defer() &&
+        hamt_enabled() && flag_reduction_tb_hamt_recover()) {
+        int v = latx_sysflagtb_verify_tb(tb, ret);
+        if (v) {
+            fprintf(stderr, "[LATX-SYS] sysflagtb recovery layout invariant "
+                    "failed for tb %p (pc=%#llx): %d\n",
+                    tb, (unsigned long long)tb->pc, v);
+            abort();
+        }
+    }
+
+    return ret;
+}
+
+/* tb_add_jump() guard for option sysflagtb.  Edge @n of @tb skipped its
+ * M-EFLAGS materialisation on the direct-link fast path, so the link may only
+ * be installed when @next_tb redefines all six flags before reading any:
+ * then the successor restores the architectural flag state internally, and a
+ * later IRQ/exception exit from it observes correct flags.  When this returns
+ * false the edge keeps its "B 2" fallback, which materialises the flags and
+ * then leaves to C; a stale flag can never reach a direct link.  With the
+ * option off no TB ever sets eflag_tb_skip, so the check is a single
+ * always-false test and linking is byte-identical to before. */
+bool latx_tb_eflag_link_allowed(TranslationBlock *tb, int n,
+                                TranslationBlock *next_tb)
+{
+    /* Option off (the default): no TB ever has a skip bit, and this early
+     * return also makes the check independent of ptn.pcoffset/payload
+     * initialisation in allocation paths that predate the option. */
+    if (!flag_reduction_tb_defer()) {
+        return true;
+    }
+    if (!(TB_EFLAGTB_SKIP(tb) & (1u << n))) {
+        return true;
+    }
+    if (hamt_enabled()) {
+        /* Deferred HAMT edges require a one-word B: the generic long link
+         * is installed with two independent writes and cannot carry this
+         * protocol safely across concurrent relinking. */
+        intptr_t delta = (intptr_t)((uintptr_t)next_tb->tc.ptr -
+                         ((uintptr_t)tb->tc.ptr + tb->jmp_insn_offset[n]));
+        if ((delta & 3) || delta < -(INT64_C(1) << 27) ||
+            delta >= (INT64_C(1) << 27)) {
+            return false;
+        }
+    }
+    if (!TB_EFLAGTB_USE_VALID(next_tb)) {
+        qatomic_fetch_add(&latx_tb_eflag_stats[LATX_TB_EFLAG_STAT_VETO_UNPUB], 1);
+        return false;
+    }
+    if (TB_EFLAGTB_USE(next_tb) != 0) {
+        qatomic_fetch_add(&latx_tb_eflag_stats[LATX_TB_EFLAG_STAT_VETO_USE], 1);
+        return false;
+    }
+    return true;
+}
+
+/*
+ * option sysflagtb runtime invariants.  Verification-only state: every entry
+ * point returns immediately when the option is off (the default), so the
+ * stock TB-link path keeps its cost and behaviour.
+ */
+uint64_t latx_tb_eflag_stats[LATX_TB_EFLAG_STAT_NR];
+static bool latx_tb_eflag_stat_materialise_on;
+static gsize latx_tb_eflag_stat_inited;
+
+uint64_t *latx_tb_eflag_stat_materialise_counter(void)
+{
+    return latx_tb_eflag_stat_materialise_on ?
+        &latx_tb_eflag_stats[LATX_TB_EFLAG_STAT_MATERIALISE] : NULL;
+}
+
+void latx_tb_eflag_stat_defer(int edge_index)
+{
+    qatomic_fetch_add(&latx_tb_eflag_stats[LATX_TB_EFLAG_STAT_DEFER_EDGE], 1);
+    if (edge_index == 0) {
+        qatomic_fetch_add(&latx_tb_eflag_stats[LATX_TB_EFLAG_STAT_DEFER_TB], 1);
+    }
+}
+
+void latx_tb_eflag_stat_link(TranslationBlock *tb, int n,
+                             TranslationBlock *next_tb)
+{
+    if (!flag_reduction_tb_defer() ||
+        !(TB_EFLAGTB_SKIP(tb) & (1u << n))) {
+        return;
+    }
+    /* Invariant (b): a skip edge may only be linked to a successor whose
+     * published answer says "redefines all six flags before reading any".
+     * latx_tb_eflag_link_allowed() enforces this before the jmp_dest CAS;
+     * this check re-verifies the post-link state, so any bookkeeping mistake
+     * in the link path (e.g. patching a slot after a refused claim) is fatal
+     * instead of silently corrupting guest flags.  Deliberately not
+     * lsassertm(): that is compiled out unless CONFIG_LATX_DEBUG, and the
+     * verification must work in the release candidate build.  Only reached
+     * when the option is enabled (skip bit set), default off. */
+    if (unlikely(!TB_EFLAGTB_USE_VALID(next_tb) ||
+                 TB_EFLAGTB_USE(next_tb) != 0)) {
+        fprintf(stderr, "[LATX-SYS] sysflagtb invariant failed: skip edge %d "
+                "of tb %p linked to tb %p with eflag_use=%#x valid=%d\n",
+                n, tb, next_tb, TB_EFLAGTB_USE(next_tb),
+                TB_EFLAGTB_USE_VALID(next_tb));
+        abort();
+    }
+    qatomic_fetch_add(&latx_tb_eflag_stats[LATX_TB_EFLAG_STAT_LINK], 1);
+}
+
+static void latx_tb_eflag_stat_report(Notifier *notifier, void *opaque)
+{
+    fprintf(stderr,
+            "[LATX-SYS] sysflagtb stats: defer_tb=%" PRIu64
+            " defer_edge=%" PRIu64 " link=%" PRIu64
+            " veto_use=%" PRIu64 " veto_unpub=%" PRIu64
+            " materialise=%" PRIu64 " recovered=%" PRIu64
+            " recover_reject=%" PRIu64 " (%s)\n",
+            qatomic_read(&latx_tb_eflag_stats[LATX_TB_EFLAG_STAT_DEFER_TB]),
+            qatomic_read(&latx_tb_eflag_stats[LATX_TB_EFLAG_STAT_DEFER_EDGE]),
+            qatomic_read(&latx_tb_eflag_stats[LATX_TB_EFLAG_STAT_LINK]),
+            qatomic_read(&latx_tb_eflag_stats[LATX_TB_EFLAG_STAT_VETO_USE]),
+            qatomic_read(&latx_tb_eflag_stats[LATX_TB_EFLAG_STAT_VETO_UNPUB]),
+            qatomic_read(&latx_tb_eflag_stats[LATX_TB_EFLAG_STAT_MATERIALISE]),
+            qatomic_read(&latx_tb_eflag_stats[LATX_TB_EFLAG_STAT_RECOVERED]),
+            qatomic_read(&latx_tb_eflag_stats[
+                LATX_TB_EFLAG_STAT_RECOVER_REJECT]),
+            latx_tb_eflag_stat_materialise_on ?
+                "materialisation counter on" : "materialisation counter off");
+}
+
+static Notifier latx_tb_eflag_stat_notifier = {
+    .notify = latx_tb_eflag_stat_report,
+};
+
+/* Called on the first ordinary translation when the option is enabled. */
+static void latx_tb_eflag_stat_init(void)
+{
+    if (g_once_init_enter(&latx_tb_eflag_stat_inited)) {
+        /* Publish the counter mode and register the notifier once, even when
+         * multiple vCPUs translate their first TB concurrently. */
+        latx_tb_eflag_stat_materialise_on =
+            getenv("LATS_SYSFLAGTB_STAT") != NULL;
+        qemu_add_exit_notifier(&latx_tb_eflag_stat_notifier);
+        g_once_init_leave(&latx_tb_eflag_stat_inited, 1);
+    }
 }
 
 void latxs_fix_after_excp_or_int(CPUState *cpu)

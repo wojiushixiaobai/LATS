@@ -501,6 +501,54 @@ static void __latxs_flag_reduction_parse_tb_use(TranslationBlock *tb)
     }
 }
 
+/*
+ * TB-mode counterpart of __latxs_flag_reduction_parse_tb_use().
+ *
+ * Ordinary TB-mode TBs share translation scratch, so publish the answer in
+ * the TranslationBlock.  Unlike the TU use analysis, a direct link with
+ * stale incoming flags must also be safe if the successor faults.  Permit
+ * only an immediately executed, non-faulting register CMP that really emits
+ * all flags after flag reduction and instruction-pattern selection.
+ */
+void __latxs_flag_reduction_tb_mode_parse_tb_use(TranslationBlock *tb)
+{
+    TRANSLATION_DATA *td = lsenv->tr_data;
+    IR1_INST *pir1 = td->ir1_inst_array;
+
+    /* Zero means safe, not "all flags observed".  Fail closed by default. */
+    tb->ptn.pcoffset = PTN_EFLAGTB_VALID_BIT | PTN_EFLAGTB_USE_MASK;
+    if (tb_ir1_num(tb) > 0 && !latxs_ir1_is_illegal(pir1) &&
+        !latxs_ir1_has_prefix_lock(pir1) &&
+        pir1->flags != LATXS_IR1_FLAGS_GENNOP &&
+        ir1_opcode(pir1) == X86_INS_CMP &&
+        ir1_opnd_num(pir1) == 2 && ir1_opnd_is_gpr(ir1_get_opnd(pir1, 0)) &&
+        (ir1_opnd_is_gpr(ir1_get_opnd(pir1, 1)) ||
+         ir1_opnd_is_imm(ir1_get_opnd(pir1, 1))) &&
+        ir1_get_eflag_def(pir1) == __ALL_EFLAGS
+#ifdef LATXS_INSTPTN_ENABLE
+        && pir1->instptn.opc == INSTPTN_OPC_NONE
+#endif
+        ) {
+        tb->ptn.pcoffset = PTN_EFLAGTB_VALID_BIT;
+    }
+    /*
+     * Verification invariant (option-gated: this pass only runs when
+     * sysflagtb is enabled): the TB-mode answer is published in the inert
+     * ptn payload, so the payload must stay inside the bits reserved above and
+     * ptn.eflag_type must stay INVALID (the HAMT deferred-flag recovery path
+     * dispatches on eflag_type and would otherwise read these bits as a
+     * deferred-op record).  Fail fast: a collision would corrupt recovery.
+     */
+    if (unlikely(tb->ptn.eflag_type != PTN_EFLAG_TYPE_INVALID ||
+                 (tb->ptn.pcoffset &
+                  ~(PTN_EFLAGTB_VALID_BIT | PTN_EFLAGTB_USE_MASK)) != 0)) {
+        fprintf(stderr, "[LATX-SYS] sysflagtb ptn payload invariant failed: "
+                "eflag_type=%d pcoffset=%#x\n",
+                tb->ptn.eflag_type, tb->ptn.pcoffset);
+        abort();
+    }
+}
+
 void __latxs_flag_reduction(TranslationBlock *tb)
 {
     latxs_flag_check(option_sys_flag_reduction, tb);

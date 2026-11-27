@@ -1092,9 +1092,9 @@ static int tb_disasm_one(IR1_INST *pir1,
     return 0;
 }
 
-static int tb_disasm_eflag_use_zero(TranslationBlock *tb,
+static int tb_disasm_eflag_use_zero_impl(TranslationBlock *tb,
         CPUState *cpu, target_ulong pc,
-        target_ulong cs_base, uint32_t flags, int cflags)
+        target_ulong cs_base, uint32_t flags, int cflags, bool force)
 {
     TRANSLATION_DATA *td = lsenv->tr_data;
     CPUX86State *env = cpu->env_ptr;
@@ -1106,8 +1106,9 @@ static int tb_disasm_eflag_use_zero(TranslationBlock *tb,
     int codemode;
     int i = 0;
 
-    if (!flag_reduction_tu_pre_disasm() ||
-            (in_aot_translate && !option_aot_tu_pre_disasm)) {
+    if (!force &&
+            (!flag_reduction_tu_pre_disasm() ||
+             (in_aot_translate && !option_aot_tu_pre_disasm))) {
         return 0;
     }
 
@@ -1154,6 +1155,20 @@ static int tb_disasm_eflag_use_zero(TranslationBlock *tb,
             break;
         }
 
+        /* TB-mode deferred flags require the successor's first instruction
+         * to be a register CMP.  Do not emit a deferred predecessor when
+         * the actual TB entry guard will necessarily reject the link.  The
+         * guard additionally checks the post-optimization flag mask and
+         * pattern, which cannot be determined by this pre-disassembly. */
+        if (force && (i != 0 || ir1_opcode(pir1) != X86_INS_CMP ||
+            latxs_ir1_has_prefix_lock(pir1) ||
+            ir1_opnd_num(pir1) != 2 ||
+            !ir1_opnd_is_gpr(ir1_get_opnd(pir1, 0)) ||
+            !(ir1_opnd_is_gpr(ir1_get_opnd(pir1, 1)) ||
+              ir1_opnd_is_imm(ir1_get_opnd(pir1, 1))))) {
+            break;
+        }
+
         curr_pc += pir1->info->size;
         addr += pir1->info->size;
 
@@ -1184,6 +1199,17 @@ static int tb_disasm_eflag_use_zero(TranslationBlock *tb,
 out:
     td->sys = saved_sys;
     return result;
+}
+
+/* TB-mode wrapper (option sysflagtb).  The answer is a property of the guest
+ * instruction stream at @pc, not of a particular TB object, so it is stable
+ * across TB retranslation; SMC invalidation is still required for the direct
+ * edge and is provided by the TB-link veto in tb_add_jump(). */
+int latxs_tb_disasm_eflag_use_zero(TranslationBlock *tb, CPUState *cpu,
+        target_ulong pc, target_ulong cs_base, uint32_t flags, int cflags)
+{
+    return tb_disasm_eflag_use_zero_impl(tb, cpu, pc, cs_base, flags,
+                                         cflags, true);
 }
 
 static void tu_tblist_optimize(CPUState *cpu,
@@ -1229,8 +1255,9 @@ static void tu_tblist_optimize(CPUState *cpu,
                 tb->s_data->next_tb[TU_TB_INDEX_TARGET] = target_tb;
             }
             if (!target_tb) {
-                if (tb_disasm_eflag_use_zero(tb,
-                        cpu, tb->s_data->x86_target_pc, cs_base, flags, cflags))
+                if (tb_disasm_eflag_use_zero_impl(tb,
+                        cpu, tb->s_data->x86_target_pc, cs_base, flags,
+                        cflags, false))
                 {
                     tb->s_data->eflag_use = 0;
                 }
@@ -1253,8 +1280,9 @@ static void tu_tblist_optimize(CPUState *cpu,
                 tb->s_data->next_tb[TU_TB_INDEX_TARGET] = target_tb;
             }
             if (!target_tb) {
-                if (tb_disasm_eflag_use_zero(tb,
-                        cpu, tb->s_data->x86_target_pc, cs_base, flags, cflags))
+                if (tb_disasm_eflag_use_zero_impl(tb,
+                        cpu, tb->s_data->x86_target_pc, cs_base, flags,
+                        cflags, false))
                 {
                     tb->s_data->eflag_use = 0;
                 }
@@ -1287,8 +1315,9 @@ bool tu_parse_pending_use(TranslationBlock *tb)
             tb->s_data->next_tb[TU_TB_INDEX_TARGET] = target_tb;
         }
         if (!target_tb) {
-            if (tb_disasm_eflag_use_zero(tb,
-                    cpu, tb->s_data->x86_target_pc, cs_base, flags, cflags))
+            if (tb_disasm_eflag_use_zero_impl(tb,
+                    cpu, tb->s_data->x86_target_pc, cs_base, flags,
+                    cflags, false))
             {
                 return true;
             }

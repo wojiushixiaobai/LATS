@@ -616,6 +616,13 @@ inline bool latxs_tr_ir2_generate(TranslationBlock *tb)
     IR1_INST *ir1_list = td->ir1_inst_array;
     int ir1_nr = td->ir1_nr;
 
+    /* Poisoning replaces the first word.  When it is not poisoned, clear a
+     * deferred predecessor's recovery marker before executing guest code or
+     * any TB-start observer.  HRAS and this experiment must not share $ra. */
+    if (flag_reduction_tb_defer() && hamt_enabled() &&
+        flag_reduction_tb_hamt_recover()) {
+        la_out2i(LISA_ADDI_D, &la_ra, &la_zero, 0);
+    }
     latxs_tr_gen_tb_start();
 
 #ifdef CONFIG_LATX_PROFILER
