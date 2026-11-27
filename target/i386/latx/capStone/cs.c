@@ -564,11 +564,9 @@ static void fill_insn(struct cs_struct *handle, cs_insn *insn, char *buffer, MCI
 #endif
 	uint16_t copy_size = MIN(sizeof(insn->bytes), insn->size);
 
-#ifdef CONFIG_LATX_DEBUG
 	// fill the instruction bytes.
 	// we might skip some redundant bytes in front in the case of X86
 	memcpy(insn->bytes, code + insn->size - copy_size, copy_size);
-#endif
 	insn->size = copy_size;
 
 	// alias instruction might have ID saved in OpcodePub
