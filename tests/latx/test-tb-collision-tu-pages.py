@@ -73,7 +73,8 @@ enum { ENTRY = 0x1000, SUCCESSOR = 0x2000, ENTRY_FRAME = 0x4000,
        ORIGINAL_FRAME = 0x5000, OTHER_FRAME = 0x6000, USER_FLAGS = 3 };
 static TranslationBlock winner, forced;
 static bool page_locked, forced_cached, retry_page_busy, lookup_held_lock;
-static unsigned generations, collisions;
+static bool code_published, code_protected;
+static unsigned generations, collisions, protections;
 #define tb_cflags(tb) ((tb)->cflags)
 #define tb_page_addr0(tb) ((tb)->entry_page)
 #define tb_page_addr1(tb) ((tb)->second_page)
@@ -101,7 +102,6 @@ static struct { typeof(data) *tr_data; } ls = { &data }, *lsenv = &ls;
 #define QEMU_BUILD_BUG_ON(e) _Static_assert(!(e), #e)
 #define assert_memory_lock() ((void)0)
 #define qemu_thread_jit_write() ((void)0)
-#define tlb_protect_code(phys) ((void)0)
 #define tb_unlock_page0(phys) tb_unlock_ctx_pages(1)
 #define assert_no_pages_locked() assert(!page_locked)
 #define qatomic_set(ptr, value) abort()
@@ -145,6 +145,25 @@ static void tb_unlock_ctx_pages(int all)
     page_locked = false;
 }
 
+static bool tb_page_has_code_locked(tb_page_addr_t phys)
+{
+    assert(phys == ENTRY_FRAME && page_locked);
+    return code_published;
+}
+
+static bool tlb_code_page_is_protected(tb_page_addr_t phys)
+{
+    assert(phys == ENTRY_FRAME && page_locked);
+    return code_protected;
+}
+
+static void tlb_protect_code(tb_page_addr_t phys)
+{
+    assert(phys == ENTRY_FRAME && !page_locked);
+    code_protected = true;
+    protections++;
+}
+
 static TranslationBlock *tb_lookup(CPUState *cpu, vaddr pc, uint64_t cs,
                                    uint32_t flags, int cflags)
 {
@@ -165,11 +184,12 @@ static TranslationBlock *lat_tb_gen_code_locked(CPUState *cpu, vaddr pc,
 {
     TranslationBlock key = { .pc = pc, .cs_base = cs, .flags = flags,
         .cflags = cflags, .entry_page = phys, .second_page = -1 };
-    assert(host && page_locked && flags == cpu->env_ptr->hflags);
+    assert(host && page_locked && code_protected && flags == cpu->env_ptr->hflags);
     generations++;
     assert(generations <= 2);
     /* Publish the competing entry before the ordinary key is inserted. */
     if (tb_cmp(&key, &winner)) {
+        code_published = true;
         collisions++;
         *error = GENCODE_ERR_TB_EXIST;
         return &winner;
@@ -202,12 +222,13 @@ static bool check(const char *name, bool is_tu, tb_page_addr_t successor,
     forced.pages = NULL;
     forced_cached = cached;
     lookup_held_lock = false;
-    generations = collisions = 0;
+    code_published = code_protected = false;
+    generations = collisions = protections = 0;
     TranslationBlock *result = lat_tb_gen_code(&cpu, ENTRY, 0, env.hflags, 0);
     bool ok = result == (retry ? &forced : &winner) &&
               env.hflags == (retry ? forced.flags : winner.flags) &&
               collisions == 1 && generations == (retry && !cached ? 2u : 1u) &&
-              !lookup_held_lock && !page_locked;
+              protections == 1 && !lookup_held_lock && !page_locked;
     printf("%s %s (returned %s, generations %u, lookup held lock %d)\n",
            ok ? "PASS" : "FAIL", name, result == &winner ? "winner" : "forced TB",
            generations, lookup_held_lock);
