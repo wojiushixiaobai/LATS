@@ -30,6 +30,7 @@
 #include "latx/include/latx-ras-config.h"
 #include "exec/latx-ras-tp-state.h"
 #include "latx/include/latx-native-atomic.h"
+#include "hamt-options.h"
 
 #define XEN_NR_VIRQS 24
 
@@ -352,6 +353,11 @@ typedef enum X86Seg {
 /* HAMT translates data accesses. SMEP affects instruction fetch only. */
 static inline bool x86_hamt_data_mode_supported(int pg_mode)
 {
+    /* CR4.PSE selects legacy 4 MiB pages, not long-mode 2 MiB/1 GiB
+     * leaves.  Keep the historic gate unless the experimental mode is on. */
+    if (hamt_allow_long_no_pse()) {
+        pg_mode |= PG_MODE_PSE;
+    }
     return (pg_mode & ~PG_MODE_SMEP) ==
            (PG_MODE_LMA | PG_MODE_PAE | PG_MODE_NXE | PG_MODE_PSE | PG_MODE_WP);
 }

@@ -437,6 +437,46 @@ static void hamt_temp_data_restore(int cpuid)
 
 #include "exec/ram_addr.h"
 
+/*
+ * A page-table entry is itself a guest physical memory access.  The direct
+ * HACK_RAMBASE alias is only valid for ordinary mapped RAM; a page-table
+ * address can instead point into an address-space hole or an MMIO/SMC/VGA
+ * region.  Leave those cases to QEMU's complete MMU walker, including the
+ * A/D-bit update and any device or dirty-memory side effects.
+ *
+ * Check the entire 8-byte entry before consulting either protection byte.
+ * The two endpoints are normally in the same page (x86 entries are aligned),
+ * but checking both also keeps this helper correct for a malformed input.
+ */
+static bool hamt_ptw_pte_direct_ok(CPUX86State *env, uint64_t pte_addr)
+{
+#ifdef CONFIG_LATX_HACK_MEM
+    uint64_t last;
+    uint64_t first_page, last_page;
+
+    if (pte_addr > UINT64_MAX - (sizeof(uint64_t) - 1)) {
+        return false;
+    }
+    last = pte_addr + sizeof(uint64_t) - 1;
+    first_page = pte_addr >> TARGET_PAGE_BITS;
+    last_page = last >> TARGET_PAGE_BITS;
+    if (!ptwdata || env->ptw4k != ptwdata ||
+        first_page >= ptwdata_size || last_page >= ptwdata_size ||
+        !((pte_addr >= 0x100000 && last < latx_hack_ram_below_4g_end) ||
+          (pte_addr >= latx_hack_ram_above_4g_start &&
+           last < latx_hack_ram_above_4g_end))) {
+        return false;
+    }
+    return qatomic_read(&ptwdata[first_page]) == 0 &&
+           qatomic_read(&ptwdata[last_page]) == 0;
+#else
+    /* This direct-alias safety proof requires the HACK RAM layout. */
+    (void)env;
+    (void)pte_addr;
+    return false;
+#endif
+}
+
 static bool hamt_ptw_set_ad(uint64_t haddr, uint64_t pte, uint32_t set)
 {
     if (!(set & ~pte)) {
@@ -483,7 +523,10 @@ restart:
 
     /* Page table level 4 */
     pte_addr = ((pte & PG_ADDRESS_MASK) + (((addr >> 39) & 0x1ff) << 3));
-    checked_ptw_range(pte_addr, 8);
+    if (!hamt_ptw_pte_direct_ok(env, pte_addr)) {
+        ptwerror->error = HAMT_PTW_ERROR_NOTRAM;
+        goto returnfalse;
+    }
     haddr = pte_addr + rambase; /* HVA = GPA + rambase */
     pte = *((uint64_t *)haddr);
     if (!(pte & PG_PRESENT_MASK)) goto do_fault;
@@ -496,7 +539,10 @@ restart:
 
     /* Page table level 3 */
     pte_addr = ((pte & PG_ADDRESS_MASK) + (((addr >> 30) & 0x1ff) << 3));
-    checked_ptw_range(pte_addr, 8);
+    if (!hamt_ptw_pte_direct_ok(env, pte_addr)) {
+        ptwerror->error = HAMT_PTW_ERROR_NOTRAM;
+        goto returnfalse;
+    }
     haddr = pte_addr + rambase; /* HVA = GPA + rambase */
     pte = *((uint64_t *)haddr);
     if (!(pte & PG_PRESENT_MASK)) goto do_fault;
@@ -516,7 +562,10 @@ restart:
 
     /* Page table level 2 */
     pte_addr = ((pte & PG_ADDRESS_MASK) + (((addr >> 21) & 0x1ff) << 3));
-    checked_ptw_range(pte_addr, 8);
+    if (!hamt_ptw_pte_direct_ok(env, pte_addr)) {
+        ptwerror->error = HAMT_PTW_ERROR_NOTRAM;
+        goto returnfalse;
+    }
     haddr = pte_addr + rambase; /* HVA = GPA + rambase */
     pte = *((uint64_t *)haddr);
     if (!(pte & PG_PRESENT_MASK)) goto do_fault;
@@ -536,7 +585,10 @@ restart:
 
     /* Page table level 1 */
     pte_addr = ((pte & PG_ADDRESS_MASK) + (((addr >> 12) & 0x1ff) << 3));
-    checked_ptw_range(pte_addr, 8);
+    if (!hamt_ptw_pte_direct_ok(env, pte_addr)) {
+        ptwerror->error = HAMT_PTW_ERROR_NOTRAM;
+        goto returnfalse;
+    }
     haddr = pte_addr + rambase; /* HVA = GPA + rambase */
     pte = *((uint64_t *)haddr);
     if (!(pte & PG_PRESENT_MASK)) goto do_fault;

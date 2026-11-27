@@ -121,6 +121,9 @@ void x86_cpu_set_a20(X86CPU *cpu, int a20_state)
            we must flush everything */
         tlb_flush(cs);
         env->a20_mask = ~(1 << 20) | (a20_state << 20);
+        if (hamt_allow_long_no_pse()) {
+            update_hamt_en(env);
+        }
     }
 }
 
@@ -189,7 +192,7 @@ void cpu_x86_update_cr4(CPUX86State *env, uint32_t new_cr4)
     uint32_t flush_bits = CR4_PCIDE_MASK | CR4_PGE_MASK | CR4_PAE_MASK |
                           CR4_PSE_MASK | CR4_SMEP_MASK | CR4_SMAP_MASK |
                           CR4_LA57_MASK;
-    if (option_pcid) {
+    if (option_pcid || hamt_allow_long_no_pse()) {
         flush_bits |= CR4_PKE_MASK | CR4_PKS_MASK;
     }
     if ((new_cr4 ^ env->cr[4]) & flush_bits) {
@@ -627,7 +630,8 @@ void do_cpu_sipi(X86CPU *cpu)
 void cpu_load_efer(CPUX86State *env, uint64_t val)
 {
 #ifndef CONFIG_USER_ONLY
-    if (option_pcid && ((env->efer ^ val) & (MSR_EFER_NXE | MSR_EFER_LMA))) {
+    if ((option_pcid || hamt_allow_long_no_pse()) &&
+        ((env->efer ^ val) & (MSR_EFER_NXE | MSR_EFER_LMA))) {
         tlb_flush(env_cpu(env));
     }
 #endif

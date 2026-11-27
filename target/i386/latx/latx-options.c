@@ -1221,6 +1221,31 @@ static void latxs_arch_options_check(void)
 
 static void latx_sys_check_options(void)
 {
+    if (hamt_allow_long_no_pse()) {
+#if !defined(CONFIG_SOFTMMU) || !defined(CONFIG_LATX_HACK_MEM)
+        warn_report("HAMT long-no-PSE requires system mode with hack mem; "
+                    "disabling experimental mode");
+        option_hamt_config &= ~HAMT_CONFIG_LONG_NO_PSE;
+#else
+        if (!option_hamt || tu_runtime_enabled() || option_sys_aot ||
+            option_aot_save || option_aot_load || option_aot_fork) {
+            warn_report("HAMT long-no-PSE requires HAMT and ordinary TB "
+                        "mode without AOT; disabling experimental mode");
+            option_hamt_config &= ~HAMT_CONFIG_LONG_NO_PSE;
+        } else {
+            /* In-refill and inline instruction walkers have independent
+             * protection and lifecycle constraints; use the C walker. */
+            if (option_hamt_config & 0xc0) {
+                warn_report("HAMT long-no-PSE disables in-refill PTW");
+                option_hamt_config &= ~0xc0;
+            }
+            if (option_fast_itlb_ptw) {
+                warn_report("HAMT long-no-PSE disables fastitlbptw");
+                option_fast_itlb_ptw = 0;
+            }
+        }
+#endif
+    }
     if (option_pcid &&
         (!hamt_enabled() || !hamt_mode_dmw() || hamt_disable_asid() ||
          !hamt_do_taskset())) {

@@ -71,13 +71,55 @@ int update_hamt_en(CPUX86State *env)
 {
     if (!hamt_enabled())
         return 0;
-    if (x86_hamt_data_mode_supported(get_pg_mode(env))) {
+    /*
+     * QEMU watchpoints are enforced by encoding TLB_WATCHPOINT in the soft-TLB
+     * entry tag (later folded into TLB_FORCE_SLOW).  HAMT data accesses execute
+     * natively from the guest PTE and never consult that entry, so while any
+     * watchpoint is installed the HAMT data path must be left entirely: the
+     * CPU then uses the ordinary soft-MMU helpers, which do check watchpoints.
+     * The cost only applies while a debugger/guest-DR watchpoint is active.
+     */
+    if (!QTAILQ_EMPTY(&env_cpu(env)->watchpoints)) {
+        env->hflags &= ~HF_HAMT_EN_MASK;
+        return 1;
+    }
+    if (x86_hamt_data_mode_supported(get_pg_mode(env)) &&
+        (!hamt_allow_long_no_pse() || (env->a20_mask & (1U << 20)))) {
         env->hflags |= HF_HAMT_EN_MASK;
     } else {
         env->hflags &= ~HF_HAMT_EN_MASK;
     }
     return 1;
 }
+
+#ifdef CONFIG_SOFTMMU
+/*
+ * Called from softmmu/watchpoint.c after a per-CPU watchpoint list change.
+ * Re-evaluates HF_HAMT_EN and, if it changed, stops the current TB and flushes
+ * the vCPU's TLB.  Stale TBs stay reachable only by lookup with their original
+ * flags: TB flags are part of the lookup key and direct links are only formed
+ * between TBs with equal flags, so no non-HAMT path can chain into them.
+ *
+ * Context: guest DR0-3 insertion runs on the owning vCPU; GDB stub insertion
+ * and removal run with all vCPUs stopped.  Both contexts may update hflags.
+ */
+void latx_hamt_watchpoint_sync(CPUState *cpu)
+{
+    CPUX86State *env = &X86_CPU(cpu)->env;
+    int old, now;
+
+    if (!hamt_enabled()) {
+        return;
+    }
+    old = env->hflags & HF_HAMT_EN_MASK;
+    update_hamt_en(env);
+    now = env->hflags & HF_HAMT_EN_MASK;
+    if (old != now) {
+        tlb_flush(cpu);
+        cpu_interrupt(cpu, CPU_INTERRUPT_EXITTB);
+    }
+}
+#endif
 
 /* return non zero if error */
 static inline int load_segment_ra(CPUX86State *env, uint32_t *e1_ptr,

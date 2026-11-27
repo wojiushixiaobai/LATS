@@ -63,7 +63,6 @@ typedef struct PTETranslate {
     hwaddr gaddr;
 } PTETranslate;
 
-#ifndef CONFIG_LATX_HACK_MEM
 static bool ptw_translate(PTETranslate *inout, hwaddr addr)
 {
     CPUTLBEntryFull *full;
@@ -86,7 +85,6 @@ static bool ptw_translate(PTETranslate *inout, hwaddr addr)
     }
     return true;
 }
-#endif
 
 static inline uint32_t ptw_ldl(const PTETranslate *in)
 {
@@ -139,6 +137,21 @@ static inline bool ptw_setl(const PTETranslate *in, uint32_t old, uint32_t set)
 
 #include "latx-hack.h"
 
+#ifdef CONFIG_LATX_HACK_MEM
+/* The experimental long-mode HAMT path can fall back here for page tables
+ * in MMIO, holes or protected RAM.  Resolve those accesses through the
+ * physical TLB, including its dirty and device handling, instead of blindly
+ * dereferencing the HACK_RAMBASE alias.  Keep the existing default path. */
+static inline bool ptw_hack_translate(PTETranslate *inout, hwaddr addr)
+{
+    if (unlikely(hamt_allow_long_no_pse())) {
+        return ptw_translate(inout, addr);
+    }
+    inout->haddr = (void *)(uintptr_t)(addr + HACK_RAMBASE);
+    return true;
+}
+#endif
+
 static bool mmu_translate_fast(
         CPUX86State *env, const TranslateParams *in,
         TranslateResult *out, TranslateFault *err)
@@ -154,9 +167,6 @@ static bool mmu_translate_fast(
     hwaddr pte_addr, paddr;
     int page_size;
     int error_code;
-#ifdef CONFIG_LATX_HACK_MEM
-    uint64_t rambase = HACK_RAMBASE;
-#endif
 
 restart:
     rsvd_mask = 0x000fff0000000000LL;
@@ -169,14 +179,15 @@ restart:
      */
     pte_addr = ((pte & PG_ADDRESS_MASK) + (((addr >> 39) & 0x1ff) << 3));
 #ifdef CONFIG_LATX_HACK_MEM
-    pte_trans.haddr = (void *)pte_addr + rambase; /* HVA = GPA + rambase */
+    if (!ptw_hack_translate(&pte_trans, pte_addr)) {
+        return false;
+    }
 #else
     if (!latx_fast_gpa_to_hva(env, pte_addr, (uint64_t *)&pte_trans.haddr)) {
         if (!ptw_translate(&pte_trans, pte_addr)) return false;
     }
 #endif
-    /*pte = ptw_ldq(&pte_trans);*/
-    pte = *((uint64_t *)pte_trans.haddr);
+    pte = ptw_ldq(&pte_trans);
     if (!(pte & PG_PRESENT_MASK)) goto do_fault;
     if (pte & (rsvd_mask | PG_PSE_MASK)) goto do_fault_rsvd;
 
@@ -191,14 +202,15 @@ restart:
      */
     pte_addr = ((pte & PG_ADDRESS_MASK) + (((addr >> 30) & 0x1ff) << 3));
 #ifdef CONFIG_LATX_HACK_MEM
-    pte_trans.haddr = (void *)pte_addr + rambase; /* HVA = GPA + rambase */
+    if (!ptw_hack_translate(&pte_trans, pte_addr)) {
+        return false;
+    }
 #else
     if (!latx_fast_gpa_to_hva(env, pte_addr, (uint64_t *)&pte_trans.haddr)) {
         if (!ptw_translate(&pte_trans, pte_addr)) return false;
     }
 #endif
-    /*pte = ptw_ldq(&pte_trans);*/
-    pte = *((uint64_t *)pte_trans.haddr);
+    pte = ptw_ldq(&pte_trans);
     if (!(pte & PG_PRESENT_MASK)) goto do_fault;
     if (pte & rsvd_mask) goto do_fault_rsvd;
     if (!ptw_setl(&pte_trans, pte, PG_ACCESSED_MASK)) {
@@ -217,14 +229,15 @@ restart:
      */
     pte_addr = ((pte & PG_ADDRESS_MASK) + (((addr >> 21) & 0x1ff) << 3));
 #ifdef CONFIG_LATX_HACK_MEM
-    pte_trans.haddr = (void *)pte_addr + rambase; /* HVA = GPA + rambase */
+    if (!ptw_hack_translate(&pte_trans, pte_addr)) {
+        return false;
+    }
 #else
     if (!latx_fast_gpa_to_hva(env, pte_addr, (uint64_t *)&pte_trans.haddr)) {
         if (!ptw_translate(&pte_trans, pte_addr)) return false;
     }
 #endif
-    /*pte = ptw_ldq(&pte_trans);*/
-    pte = *((uint64_t *)pte_trans.haddr);
+    pte = ptw_ldq(&pte_trans);
     if (!(pte & PG_PRESENT_MASK)) goto do_fault;
     if (pte & rsvd_mask) goto do_fault_rsvd;
     if (pte & PG_PSE_MASK) {
@@ -244,7 +257,9 @@ restart:
      */
     pte_addr = ((pte & PG_ADDRESS_MASK) + (((addr >> 12) & 0x1ff) << 3));
 #ifdef CONFIG_LATX_HACK_MEM
-    pte_trans.haddr = (void *)pte_addr + rambase; /* HVA = GPA + rambase */
+    if (!ptw_hack_translate(&pte_trans, pte_addr)) {
+        return false;
+    }
 #else
     if (!latx_fast_gpa_to_hva(env, pte_addr, (uint64_t *)&pte_trans.haddr)) {
         if (!ptw_translate(&pte_trans, pte_addr)) return false;
@@ -345,9 +360,6 @@ static bool mmu_translate(CPUX86State *env, const TranslateParams *in,
         return mmu_translate_fast(env, in, out, err);
     }
 
-#ifdef CONFIG_LATX_HACK_MEM
-    uint64_t rambase = HACK_RAMBASE;
-#endif
     const int32_t a20_mask = x86_get_a20_mask(env);
     const target_ulong addr = in->addr;
     const int pg_mode = in->pg_mode;
@@ -382,7 +394,9 @@ static bool mmu_translate(CPUX86State *env, const TranslateParams *in,
                 pte_addr = ((in->cr3 & ~0xfff) +
                             (((addr >> 48) & 0x1ff) << 3)) & a20_mask;
 #ifdef CONFIG_LATX_HACK_MEM
-                pte_trans.haddr = (void *)pte_addr + rambase; /* HVA = GPA + rambase */
+                if (!ptw_hack_translate(&pte_trans, pte_addr)) {
+                    return false;
+                }
 #else
                 if (!ptw_translate(&pte_trans, pte_addr)) {
                     return false;
@@ -413,7 +427,9 @@ static bool mmu_translate(CPUX86State *env, const TranslateParams *in,
                         (((addr >> 39) & 0x1ff) << 3)) & a20_mask;
 
 #ifdef CONFIG_LATX_HACK_MEM
-            pte_trans.haddr = (void *)pte_addr + rambase; /* HVA = GPA + rambase */
+            if (!ptw_hack_translate(&pte_trans, pte_addr)) {
+                return false;
+            }
 #else
             if (!ptw_translate(&pte_trans, pte_addr)) {
                 return false;
@@ -439,7 +455,9 @@ static bool mmu_translate(CPUX86State *env, const TranslateParams *in,
             pte_addr = ((pte & PG_ADDRESS_MASK) +
                         (((addr >> 30) & 0x1ff) << 3)) & a20_mask;
 #ifdef CONFIG_LATX_HACK_MEM
-            pte_trans.haddr = (void *)pte_addr + rambase; /* HVA = GPA + rambase */
+            if (!ptw_hack_translate(&pte_trans, pte_addr)) {
+                return false;
+            }
 #else
             if (!ptw_translate(&pte_trans, pte_addr)) {
                 return false;
@@ -471,7 +489,9 @@ static bool mmu_translate(CPUX86State *env, const TranslateParams *in,
              */
             pte_addr = ((in->cr3 & ~0x1f) + ((addr >> 27) & 0x18)) & a20_mask;
 #ifdef CONFIG_LATX_HACK_MEM
-            pte_trans.haddr = (void *)pte_addr + rambase; /* HVA = GPA + rambase */
+            if (!ptw_hack_translate(&pte_trans, pte_addr)) {
+                return false;
+            }
 #else
             if (!ptw_translate(&pte_trans, pte_addr)) {
                 return false;
@@ -498,7 +518,9 @@ static bool mmu_translate(CPUX86State *env, const TranslateParams *in,
         pte_addr = ((pte & PG_ADDRESS_MASK) +
                     (((addr >> 21) & 0x1ff) << 3)) & a20_mask;
 #ifdef CONFIG_LATX_HACK_MEM
-        pte_trans.haddr = (void *)pte_addr + rambase; /* HVA = GPA + rambase */
+        if (!ptw_hack_translate(&pte_trans, pte_addr)) {
+            return false;
+        }
 #else
         if (!ptw_translate(&pte_trans, pte_addr)) {
             return false;
@@ -529,7 +551,9 @@ static bool mmu_translate(CPUX86State *env, const TranslateParams *in,
         pte_addr = ((pte & PG_ADDRESS_MASK) +
                     (((addr >> 12) & 0x1ff) << 3)) & a20_mask;
 #ifdef CONFIG_LATX_HACK_MEM
-        pte_trans.haddr = (void *)pte_addr + rambase; /* HVA = GPA + rambase */
+        if (!ptw_hack_translate(&pte_trans, pte_addr)) {
+            return false;
+        }
 #else
         if (!ptw_translate(&pte_trans, pte_addr)) {
             return false;
@@ -552,7 +576,9 @@ static bool mmu_translate(CPUX86State *env, const TranslateParams *in,
          */
         pte_addr = ((in->cr3 & ~0xfff) + ((addr >> 20) & 0xffc)) & a20_mask;
 #ifdef CONFIG_LATX_HACK_MEM
-        pte_trans.haddr = (void *)pte_addr + rambase; /* HVA = GPA + rambase */
+        if (!ptw_hack_translate(&pte_trans, pte_addr)) {
+            return false;
+        }
 #else
         if (!ptw_translate(&pte_trans, pte_addr)) {
             return false;
@@ -585,7 +611,9 @@ static bool mmu_translate(CPUX86State *env, const TranslateParams *in,
          */
         pte_addr = ((pte & ~0xfffu) + ((addr >> 10) & 0xffc)) & a20_mask;
 #ifdef CONFIG_LATX_HACK_MEM
-        pte_trans.haddr = (void *)pte_addr + rambase; /* HVA = GPA + rambase */
+        if (!ptw_hack_translate(&pte_trans, pte_addr)) {
+            return false;
+        }
 #else
         if (!ptw_translate(&pte_trans, pte_addr)) {
             return false;

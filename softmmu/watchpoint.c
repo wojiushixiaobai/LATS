@@ -27,6 +27,15 @@
 #include "hw/core/tcg-cpu-ops.h"
 #include "hw/core/cpu.h"
 
+#ifdef TARGET_I386
+/*
+ * HAMT data accesses bypass the soft-TLB tags that enforce watchpoints; this
+ * target hook leaves the HAMT data path while any watchpoint is installed.
+ * Defined in target/i386/tcg/seg_helper.c (system emulation only).
+ */
+void latx_hamt_watchpoint_sync(CPUState *cpu);
+#endif
+
 /* Add a watchpoint.  */
 int cpu_watchpoint_insert(CPUState *cpu, vaddr addr, vaddr len,
                           int flags, CPUWatchpoint **watchpoint)
@@ -63,6 +72,9 @@ int cpu_watchpoint_insert(CPUState *cpu, vaddr addr, vaddr len,
     if (watchpoint) {
         *watchpoint = wp;
     }
+#ifdef TARGET_I386
+    latx_hamt_watchpoint_sync(cpu);
+#endif
     return 0;
 }
 
@@ -90,6 +102,10 @@ void cpu_watchpoint_remove_by_ref(CPUState *cpu, CPUWatchpoint *watchpoint)
     tlb_flush_page(cpu, watchpoint->vaddr);
 
     g_free(watchpoint);
+
+#ifdef TARGET_I386
+    latx_hamt_watchpoint_sync(cpu);
+#endif
 }
 
 /* Remove all matching watchpoints.  */

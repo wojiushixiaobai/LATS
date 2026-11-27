@@ -14,6 +14,13 @@ extern int option_hamt_config;
 extern int option_hamt_dump;
 extern int option_hamt_print;
 
+/* Experimental: permit four-level long-mode data translation when CR4.PSE
+ * is clear.  This first version restricts direct data accesses to CPL3. */
+#define HAMT_CONFIG_LONG_NO_PSE (1U << 18)
+static inline bool hamt_allow_long_no_pse(void) {
+    return (option_hamt_config & HAMT_CONFIG_LONG_NO_PSE) != 0;
+}
+
 static inline int hamt_enabled(void) {
     return option_hamt;
 }
@@ -82,6 +89,9 @@ static inline int hamt_use_ptw_inrefill_4K2M(void) {
 }
 
 static inline bool hamt_do_cpl(int cpl) {
+    if (hamt_allow_long_no_pse() && cpl != 3) {
+        return false;
+    }
     return option_hamt_config & (1 << (cpl & 0x3));
 }
 static inline bool hamt_do_cpl_any(void) {
