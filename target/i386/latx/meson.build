@@ -56,10 +56,13 @@ capStone = declare_dependency(link_with: libcapStone,
                               include_directories: ['capStone/include', 'capStone/include/capstone'])
 
 
+if 'CONFIG_LATX_DEBUG' in config_host or 'CONFIG_LATX_PROFILER' in config_host
+  i386_ss.add(files('perfmap.c'))
+endif
+
 i386_ss.add(files(
   'error.c',
   'mem.c',
-  'perfmap.c',
   'user-stub.c',
   'tb-record.c',
   'sys-tb-trace.c',

@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: GPL-2.0-only
  */
 
+#include "qemu/osdep.h"
+
 #include <string.h>
 #include <unistd.h>
 #include <stdio.h>
