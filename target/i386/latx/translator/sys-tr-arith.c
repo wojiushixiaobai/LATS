@@ -607,17 +607,26 @@ _default:
     //la_mul_w(dest_ir2, src0_ir2, src1_ir2);
     latxs_append_ir2_opnd3(LISA_MUL_W, &dest_ir2, &src0_ir2, &src1_ir2);
     latxs_generate_eflag_calculation(&dest_ir2, &src0_ir2, &src1_ir2, pir1, true);
-    IR2_OPND eflag_tmp_ir2 = latxs_ra_alloc_itemp();
-    latxs_append_ir2_opnd3(LISA_XOR, &eflag_tmp_ir2, &src0_ir2, &src1_ir2);
-    latxs_append_ir2_opnd2i(LISA_SRLI_W, &eflag_tmp_ir2, &eflag_tmp_ir2, 0x8);
-    latxs_append_ir2_opnd1i(LISA_X86MTFLAG, &eflag_tmp_ir2, 0x10);
+    /*
+     * SF is architecturally undefined after IMUL: the usedef table marks
+     * SF as undef for IMUL, so ir1_need_calculate_sf() is false here and
+     * the main IMUL paths never materialise SF either.  Mirror the main
+     * path and only write it when a flag consumer actually needs it
+     * instead of paying an unconditional 3 ALU + M-EFLAGS RMW.
+     */
+    if (ir1_need_calculate_sf(pir1)) {
+        IR2_OPND eflag_tmp_ir2 = latxs_ra_alloc_itemp();
+        latxs_append_ir2_opnd3(LISA_XOR, &eflag_tmp_ir2, &src0_ir2, &src1_ir2);
+        latxs_append_ir2_opnd2i(LISA_SRLI_W, &eflag_tmp_ir2, &eflag_tmp_ir2, 0x8);
+        latxs_append_ir2_opnd1i(LISA_X86MTFLAG, &eflag_tmp_ir2, 0x10);
+        latxs_ra_free_temp(&eflag_tmp_ir2);
+    }
     //store_ireg_to_ir1(dest_ir2, dest, false);
     latxs_store_ir2_to_ir1(&dest_ir2, dest);
     //ra_free_temp(dest_ir2);
     latxs_ra_free_temp(&dest_ir2);
     latxs_ra_free_temp(&src1_ir2);
     latxs_ra_free_temp(&src0_ir2);
-    latxs_ra_free_temp(&eflag_tmp_ir2);
     return true;
 }
 
