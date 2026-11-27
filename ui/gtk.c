@@ -539,10 +539,13 @@ static void gd_switch(DisplayChangeListener *dcl,
     }
 }
 
+#include "gtk-swap.h"
+
 static const DisplayChangeListenerOps dcl_ops = {
     .dpy_name             = "gtk",
     .dpy_gfx_update       = gd_update,
     .dpy_gfx_switch       = gd_switch,
+    .dpy_gfx_can_swap     = gd_can_swap,
     .dpy_gfx_check_format = qemu_pixman_check_format,
     .dpy_refresh          = gd_refresh,
     .dpy_mouse_set        = gd_mouse_set,

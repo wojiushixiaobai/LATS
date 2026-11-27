@@ -99,6 +99,7 @@
 #include "block/thread-pool.h"
 #include "ui/console.h"
 #include "ui/input.h"
+#include "reims-readback-surface.h"
 #include <reims_vgpu.h>
 #include "hamt-options.h"
 #define target_aarch64() false
@@ -175,6 +176,7 @@ struct ReimsGraphicsPCIState {
     QEMUBH *event_bh;
 
     char *resolution; /* the property: the window's first size, or NULL */
+    bool readback_surface_swap; /* opt-in: publish each read buffer as a surface */
 
     /* Mutable state (BQL protected) */
     uint32_t input_buttons; /* RVG_WINDOW_BUTTON_* bits the guest was sent */
@@ -932,6 +934,16 @@ static void reims_graphics_pci_read_done_bh(void *opaque)
                       "%s: rvg_graphics_device_read_display: %s\n",
                       TYPE_REIMS_GRAPHICS_PCI,
                       rvg_status_message(job->status));
+    } else if (s->con && s->readback_surface_swap &&
+               qemu_console_can_swap_surface(s->con)) {
+        /* The image owns the pixels until every listener drops its reference. */
+        surface = reims_graphics_surface_from_pixels(job->width, job->height,
+                                                     job->pixels);
+        job->pixels = NULL;
+        job->length = 0;
+        s->surface = surface;
+        dpy_gfx_replace_surface(s->con, surface);
+        dpy_gfx_update_full(s->con);
     } else if (s->con) {
         if (!surface || surface_width(surface) != job->width ||
             surface_height(surface) != job->height) {
@@ -1015,6 +1027,12 @@ static bool reims_graphics_pci_gfx_update(void *opaque)
     job->length = s->pixels_length;
     s->pixels = NULL;
     s->pixels_length = 0;
+    if (s->readback_surface_swap && !job->pixels && s->surface) {
+        /* Avoid a size-probe call on every read after the first. */
+        job->length = (size_t)surface_width(s->surface) *
+                      surface_height(s->surface) * 4;
+        job->pixels = g_malloc(job->length);
+    }
     WITH_QEMU_LOCK_GUARD(&s->read_lock) {
         s->read_running = true;
     }
@@ -1532,6 +1550,8 @@ static void reims_graphics_pci_finalize(Object *obj)
 
 static Property reims_graphics_pci_properties[] = {
     DEFINE_PROP_STRING("resolution", ReimsGraphicsPCIState, resolution),
+    DEFINE_PROP_BOOL("readback-surface-swap", ReimsGraphicsPCIState,
+                     readback_surface_swap, false),
     DEFINE_PROP_END_OF_LIST(),
 };
 

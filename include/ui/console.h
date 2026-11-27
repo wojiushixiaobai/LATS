@@ -241,6 +241,8 @@ typedef struct DisplayChangeListenerOps {
     /* optional */
     void (*dpy_gfx_switch)(DisplayChangeListener *dcl,
                            struct DisplaySurface *new_surface);
+    /* Optional: inexpensive, safe repeated surface replacement right now. */
+    bool (*dpy_gfx_can_swap)(DisplayChangeListener *dcl);
     /* optional */
     bool (*dpy_gfx_check_format)(DisplayChangeListener *dcl,
                                  pixman_format_code_t format);
@@ -368,6 +370,7 @@ void dpy_gfx_update(QemuConsole *con, int x, int y, int w, int h);
 void dpy_gfx_update_full(QemuConsole *con);
 void dpy_gfx_replace_surface(QemuConsole *con,
                              DisplaySurface *surface);
+bool qemu_console_can_swap_surface(QemuConsole *con);
 void dpy_text_cursor(QemuConsole *con, int x, int y);
 void dpy_text_update(QemuConsole *con, int x, int y, int w, int h);
 void dpy_text_resize(QemuConsole *con, int w, int h);

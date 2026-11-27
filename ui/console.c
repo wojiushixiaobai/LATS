@@ -1924,6 +1924,13 @@ void dpy_gfx_update_full(QemuConsole *con)
     dpy_gfx_update(con, 0, 0, w, h);
 }
 
+#include "console-swap.h"
+
+bool qemu_console_can_swap_surface(QemuConsole *con)
+{
+    return console_swap_listeners_allow(con, active_console);
+}
+
 void dpy_gfx_replace_surface(QemuConsole *con,
                              DisplaySurface *surface)
 {
