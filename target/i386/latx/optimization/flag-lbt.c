@@ -133,11 +133,13 @@ void latxs_get_eflag_condition(
             break;
         }
     case X86_INS_LOOPE:
+        {
+            latxs_append_ir2_opnd1i(LISA_SETX86J, cond, COND_E);
+            break;
+        }
     case X86_INS_LOOPNE:
         {
-            latxs_append_ir2_opnd1i(LISA_X86MFFLAG, cond, 0x8);
-            latxs_append_ir2_opnd2i(LISA_SLLI_D, cond, cond, 63 - ZF_BIT_INDEX);
-            latxs_append_ir2_opnd2i(LISA_SRAI_D, cond, cond, 63);
+            latxs_append_ir2_opnd1i(LISA_SETX86J, cond, COND_NE);
             break;
         }
     case X86_INS_CMOVAE:

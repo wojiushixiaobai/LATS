@@ -503,9 +503,12 @@ bool latxs_translate_loopnz(IR1_INST *pir1)
     IR2_OPND temp_zf = latxs_ra_alloc_itemp();
     latxs_get_eflag_condition(&temp_zf, pir1);
 
-    /* By now, if zf =0, then temp_zf =0 else temp_zf = 0xFFFFFFFFFFFFFFFF */
-    latxs_append_ir2_opnd3(LISA_NOR, &temp_zf, &temp_zf, &latxs_zero_ir2_opnd);
-    latxs_append_ir2_opnd3(LISA_AND, &temp_zf, &temp_zf, &ir2_xcx);
+    /*
+     * temp_zf = 1 iff ZF==0 (COND_NE from setx86j).  maskeqz selects the
+     * decremented counter when that condition holds and 0 otherwise, so
+     * the following BNEZ is "count != 0 && ZF == 0".
+     */
+    latxs_append_ir2_opnd3(LISA_MASKEQZ, &temp_zf, &ir2_xcx, &temp_zf);
 
     GEN_EOB;
     LOAD_TB_PTR_TO_DBT_ARG1;
@@ -561,8 +564,12 @@ bool latxs_translate_loopz(IR1_INST *pir1)
     IR2_OPND temp_zf = latxs_ra_alloc_itemp();
     latxs_get_eflag_condition(&temp_zf, pir1);
 
-    /* By now, if zf =0, then temp_zf =0 else temp_zf = 0xFFFFFFFFFFFFFFFF */
-    latxs_append_ir2_opnd3(LISA_AND, &temp_zf, &temp_zf, &ir2_xcx);
+    /*
+     * temp_zf = 1 iff ZF==1 (COND_E from setx86j).  maskeqz selects the
+     * decremented counter when that condition holds and 0 otherwise, so
+     * the following BNEZ is "count != 0 && ZF == 1".
+     */
+    latxs_append_ir2_opnd3(LISA_MASKEQZ, &temp_zf, &ir2_xcx, &temp_zf);
 
     GEN_EOB;
     LOAD_TB_PTR_TO_DBT_ARG1;
